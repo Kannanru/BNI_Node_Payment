@@ -1,7 +1,7 @@
 const Payment = require('../models/Payment');
 const Visitor = require('../models/Visitor');
 const { readMembers } = require('./membersData');
-const { buildMonthRange, buildCurrentMonthAndHistory, monthKeyOf } = require('./monthRange');
+const { buildMonthRange, buildCurrentMonthAndHistory, monthKeyOf, parseMonthKey } = require('./monthRange');
 
 async function loadMemberData(monthKeys) {
   const members = readMembers();
@@ -36,7 +36,7 @@ function mapPaymentEntry(payment) {
     method: payment.method,
     amount: payment.amount,
     cardLastFour: payment.cardLastFour || null,
-    paidAt: payment.paidAt,
+    paidAt: payment.paidAt || null,
     editReason: payment.editReason || null,
   };
 }
@@ -141,23 +141,30 @@ function getPendingVisitorsForMonth(memberVisitors, monthKey, visitorFee, visito
     .filter((v) => v.remaining > 0);
 }
 
-// Builds the Home-screen member list. The visible month columns are always
-// "current month, then the 1 month before it" (see
-// buildCurrentMonthAndHistory) - a pure rolling window that shifts by one
-// position every calendar month with no manual upkeep. Total Pending is
-// independent of that display window: it's the full outstanding balance
-// since Settings.defaultStartMonth plus outstanding visitor fees, so a
-// member's true balance still counts months that aren't shown as columns.
+// Builds the Home-screen member list. Two independent month windows are in
+// play here, deliberately kept separate:
+//   - displayMonths: the visible table columns, spanning every month from
+//     Settings.columnDisplayStartMonth through the live current month
+//     (current month first, labelled "This Month", then each prior month in
+//     reverse-chronological order) - grows by one column every 1st with no
+//     manual upkeep, purely as historical context.
+//   - currentMonthOnly: what Total Pending is computed from - always just
+//     the live current month, never accumulating past months, so the
+//     headline "Pending" figure only ever reflects what's due right now.
+// Both are re-derived from the system clock on every request.
 async function buildMemberList(settings) {
-  const historicalMonths = buildMonthRange(settings.defaultStartMonth);
-  const displayMonths = buildCurrentMonthAndHistory();
-  const allKeys = Array.from(new Set([...historicalMonths, ...displayMonths].map((m) => m.key)));
+  const now = new Date();
+  const currentMonthOnly = buildCurrentMonthAndHistory(now, 0);
+  const { year: startYear, month: startMonth } = parseMonthKey(settings.columnDisplayStartMonth);
+  const monthsSinceStart = Math.max(0, (now.getFullYear() * 12 + now.getMonth() + 1) - (startYear * 12 + startMonth));
+  const displayMonths = buildCurrentMonthAndHistory(now, monthsSinceStart);
+  const allKeys = Array.from(new Set([...currentMonthOnly, ...displayMonths].map((m) => m.key)));
 
   const { members, paymentsByMember, visitorsByMember } = await loadMemberData(allKeys);
 
   return members.map((member) => {
     const memberPayments = paymentsByMember.get(member.id) || new Map();
-    const { pendingAmount } = buildMonthsResult(historicalMonths, memberPayments, settings.monthlyFee);
+    const { pendingAmount } = buildMonthsResult(currentMonthOnly, memberPayments, settings.monthlyFee);
     const { monthsResult } = buildMonthsResult(displayMonths, memberPayments, settings.monthlyFee);
 
     const memberVisitors = visitorsByMember.get(member.id) || [];
@@ -203,18 +210,19 @@ async function buildMemberHistory(settings) {
   });
 }
 
-// Builds the full list of a single member's still-outstanding months (across
-// the entire Settings.defaultStartMonth-to-current-month range, not just the
-// Home screen's display window) - powers the "Current Month" payment sheet,
-// which needs to show every pending month (e.g. January and May) even if
-// they've scrolled out of the visible columns. The live current month is
+// Builds the pending-months list for a single member - powers both the
+// "Current Month" payment sheet and the Pending Breakdown sheet (opened by
+// tapping the Home screen's Pending amount). Deliberately scoped to just the
+// live current month, matching Total Pending above: older months (even if
+// still unpaid) are not surfaced here, so this list and the headline Pending
+// figure a member sees always agree with each other. The current month is
 // always included even when it's already fully paid, so tapping an
-// already-paid Current Month still opens somewhere to view (and edit) its
+// already-paid current month still opens somewhere to view (and edit) its
 // payment details instead of finding "no pending months".
 async function buildMemberPendingMonths(memberId, settings) {
-  const historicalMonths = buildMonthRange(settings.defaultStartMonth);
-  const monthKeys = historicalMonths.map((m) => m.key);
   const now = new Date();
+  const currentMonthOnly = buildCurrentMonthAndHistory(now, 0);
+  const monthKeys = currentMonthOnly.map((m) => m.key);
   const currentKey = monthKeyOf(now.getFullYear(), now.getMonth() + 1);
 
   const payments = await Payment.find({ memberId, month: { $in: monthKeys } }).sort({ paidAt: 1 }).lean();
@@ -224,7 +232,7 @@ async function buildMemberPendingMonths(memberId, settings) {
     memberPayments.get(payment.month).push(payment);
   }
 
-  const { monthsResult } = buildMonthsResult(historicalMonths, memberPayments, settings.monthlyFee);
+  const { monthsResult } = buildMonthsResult(currentMonthOnly, memberPayments, settings.monthlyFee);
 
   return Object.entries(monthsResult)
     .filter(([key, month]) => month.status === 'pending' || key === currentKey)

@@ -1,4 +1,5 @@
 const Settings = require('../models/Settings');
+const { monthKeyOf } = require('./monthRange');
 
 // These are pure calendar dates (no time-of-day meaning), so they're always
 // constructed as UTC midnight via Date.UTC - constructing with `new
@@ -6,9 +7,14 @@ const Settings = require('../models/Settings');
 // which then shifts to the previous/next day once serialized back out via
 // toISOString() (see settingsController.js's serialize()) unless the server
 // happens to run in UTC.
+// columnDisplayStartMonth defaults to the current month (not Jan like
+// defaultStartMonth) - a brand new environment (e.g. a freshly deployed
+// production instance) should start its rolling column window from whenever
+// it first came online, not from some arbitrary historical month.
 const DEFAULTS = {
   key: 'app_settings',
   defaultStartMonth: `${new Date().getFullYear()}-01`,
+  columnDisplayStartMonth: monthKeyOf(new Date().getFullYear(), new Date().getMonth() + 1),
   monthlyFee: 100,
   visitorFee: 50,
   memberPaymentStartDate: new Date(Date.UTC(new Date().getFullYear(), 0, 1)),
@@ -38,6 +44,14 @@ async function getOrCreateSettings() {
   }
   if (!settings.visitorPaymentStartDate) {
     settings.visitorPaymentStartDate = new Date(Date.UTC(2000, 0, 1));
+    needsSave = true;
+  }
+  // Backfill for a Settings document that predates columnDisplayStartMonth -
+  // anchor the column window at the current month, i.e. from right now
+  // onward, rather than retroactively expanding it back to defaultStartMonth.
+  if (!settings.columnDisplayStartMonth) {
+    const now = new Date();
+    settings.columnDisplayStartMonth = monthKeyOf(now.getFullYear(), now.getMonth() + 1);
     needsSave = true;
   }
   if (needsSave) await settings.save();

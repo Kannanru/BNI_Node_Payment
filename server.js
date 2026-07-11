@@ -2,6 +2,7 @@ const app = require('./app');
 const connectDB = require('./config/db');
 const env = require('./config/env');
 const Payment = require('./models/Payment');
+const { ensureMasterData } = require('./seed/ensureMasterData');
 
 async function start() {
   await connectDB();
@@ -9,6 +10,10 @@ async function start() {
   // dropped its old unique (memberId, month) index in favor of a plain one,
   // now that a month can have multiple payment transactions.
   await Payment.syncIndexes();
+  // Idempotent - only inserts whatever master data (login accounts, July
+  // payment/visitor records) is actually missing, every time the server
+  // starts. See seed/ensureMasterData.js.
+  await ensureMasterData();
   app.listen(env.port, () => {
     console.log(`BNI App backend listening on port ${env.port}`);
   });

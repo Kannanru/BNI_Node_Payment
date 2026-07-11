@@ -8,6 +8,15 @@ const settingsSchema = new mongoose.Schema(
     // still the field every month-range calculation actually reads, since
     // only the year/month of that date matters for that purpose.
     defaultStartMonth: { type: String, required: true, match: /^\d{4}-(0[1-9]|1[0-2])$/ }, // "YYYY-MM"
+    // Anchor for the Home screen's visible month COLUMNS only - independent
+    // of defaultStartMonth, which anchors the Total Pending balance (the
+    // club's true amount owed can predate when this column ever started
+    // being shown). Set once, to whichever month this rolling-column feature
+    // was turned on in a given environment (see getSettings.js's DEFAULTS
+    // and backfill) - from then on the column window grows by one month
+    // every 1st with no further changes needed. See
+    // paymentCalculator.js#buildMemberList.
+    columnDisplayStartMonth: { type: String, required: true, match: /^\d{4}-(0[1-9]|1[0-2])$/ },
     monthlyFee: { type: Number, required: true, min: 0 },
     visitorFee: { type: Number, required: true, min: 0 },
     // The full date (day precision) members' payment tracking starts from -
