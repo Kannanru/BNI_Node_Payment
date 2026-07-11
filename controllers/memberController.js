@@ -4,13 +4,30 @@ const { findMemberById } = require('../utils/membersData');
 
 const DEFAULT_PAGE_SIZE = 15;
 
-const SORT_MODES = new Set(['name_asc', 'name_desc', 'created_desc', 'created_asc']);
+const SORT_MODES = new Set([
+  'name_asc', 'name_desc', 'created_desc', 'created_asc', 'pending_asc', 'pending_desc',
+]);
 
 // members.json has no createdAt field - a member's position in that file IS
 // its creation order (entries are only ever appended), so "Latest Created"
 // sorting is powered by that index rather than a fabricated timestamp.
 function sortMembers(members, sort, createdIndexById) {
   const sorted = [...members];
+
+  // pending_asc/pending_desc are a true numeric sort by Total Pending, with
+  // no zero-sink override below - the whole point of clicking the Pending
+  // header for "smallest to largest" is that a fully-paid (₹0) member is
+  // the smallest value and belongs at the very top of ascending order, not
+  // pushed to the bottom regardless of sort.
+  if (sort === 'pending_asc') {
+    sorted.sort((a, b) => a.totalPending - b.totalPending);
+    return sorted;
+  }
+  if (sort === 'pending_desc') {
+    sorted.sort((a, b) => b.totalPending - a.totalPending);
+    return sorted;
+  }
+
   switch (sort) {
     case 'name_desc':
       sorted.sort((a, b) => b.name.localeCompare(a.name));
@@ -28,9 +45,10 @@ function sortMembers(members, sort, createdIndexById) {
   }
 
   // Members with a zero Total Amount always sink to the bottom, no matter
-  // which sort mode is active - Array.prototype.sort is stable in Node, so
-  // splitting the already-sorted array by this one predicate preserves the
-  // chosen order within each half rather than re-sorting either of them.
+  // which of the modes above is active - Array.prototype.sort is stable in
+  // Node, so splitting the already-sorted array by this one predicate
+  // preserves the chosen order within each half rather than re-sorting
+  // either of them.
   const withBalance = sorted.filter((m) => m.totalPending !== 0);
   const zeroBalance = sorted.filter((m) => m.totalPending === 0);
   return [...withBalance, ...zeroBalance];
