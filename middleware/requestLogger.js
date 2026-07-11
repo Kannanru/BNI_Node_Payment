@@ -18,6 +18,7 @@ function requestLogger(req, res, next) {
       console.log(line);
     }
   });
+  
 
   next();
 }

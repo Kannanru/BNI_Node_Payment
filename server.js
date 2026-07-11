@@ -17,6 +17,7 @@ async function start() {
   app.listen(env.port, () => {
     console.log(`BNI App backend listening on port ${env.port}`);
   });
+  
 }
 
 start().catch((err) => {
