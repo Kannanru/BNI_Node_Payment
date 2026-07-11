@@ -6,4 +6,5 @@ const ALLOWED_USERS = [
   { email: 'grspondy@gmail.com', name: 'GRS Pondy', password: 'grspondy@bni123' },
 ];
 
+
 module.exports = { ALLOWED_USERS };
