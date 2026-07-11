@@ -34,11 +34,7 @@ const Visitor = require('../models/Visitor');
 const Settings = require('../models/Settings');
 const { readMembers } = require('../utils/membersData');
 
-const EXCEL_PATH = path.join(
-  __dirname,
-  '..', '..', '..',
-  'bni_mobile_app', 'BNI_Flutter_payment', 'WEEK AFTER WEEK PAYMENTS.xlsx'
-);
+const EXCEL_PATH = path.join(__dirname, '..', 'data', 'WEEK AFTER WEEK PAYMENTS.xlsx');
 
 const SHEETS = [
   { name: 'may 26', monthKey: '2026-05' },

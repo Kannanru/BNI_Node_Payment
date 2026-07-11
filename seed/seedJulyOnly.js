@@ -20,11 +20,7 @@ const Payment = require('../models/Payment');
 const Visitor = require('../models/Visitor');
 const { readMembers } = require('../utils/membersData');
 
-const EXCEL_PATH = path.join(
-  __dirname,
-  '..', '..', '..',
-  'bni_mobile_app', 'BNI_Flutter_payment', 'WEEK AFTER WEEK PAYMENTS.xlsx'
-);
+const EXCEL_PATH = path.join(__dirname, '..', 'data', 'WEEK AFTER WEEK PAYMENTS.xlsx');
 
 const SHEET_NAME = 'july 26';
 const MONTH_KEY = '2026-07';

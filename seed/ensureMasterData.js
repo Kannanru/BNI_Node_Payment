@@ -9,6 +9,13 @@
 //   2. July 2026 member payment records + the July visitor placeholder,
 //      sourced from "WEEK AFTER WEEK PAYMENTS.xlsx" (see seedJulyOnly.js for
 //      the one-off destructive version this was derived from).
+//
+// The source workbook lives in data/ alongside members.json - inside this
+// repo, not the sibling Flutter app folder - specifically so it's part of
+// the deployed artifact. A relative path reaching outside the repo would
+// resolve to nothing on any server that doesn't happen to share this dev
+// machine's folder layout (e.g. production), silently skipping this section
+// instead of erroring loudly.
 const path = require('path');
 const fs = require('fs');
 const bcrypt = require('bcryptjs');
@@ -20,11 +27,7 @@ const Visitor = require('../models/Visitor');
 const { ALLOWED_USERS } = require('../config/allowedUsers');
 const { readMembers } = require('../utils/membersData');
 
-const EXCEL_PATH = path.join(
-  __dirname,
-  '..', '..', '..',
-  'bni_mobile_app', 'BNI_Flutter_payment', 'WEEK AFTER WEEK PAYMENTS.xlsx'
-);
+const EXCEL_PATH = path.join(__dirname, '..', 'data', 'WEEK AFTER WEEK PAYMENTS.xlsx');
 const SHEET_NAME = 'july 26';
 const MONTH_KEY = '2026-07';
 const NAME_OVERRIDES = new Map([['SRIDHAR J', 'SRIDAR J']]);
