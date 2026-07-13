@@ -3,6 +3,24 @@ const connectDB = require('./config/db');
 const env = require('./config/env');
 const Payment = require('./models/Payment');
 const { ensureMasterData } = require('./seed/ensureMasterData');
+const { readMembers } = require('./utils/membersData');
+const { readAllowedUsers } = require('./utils/allowedUsersData');
+
+// Prints exactly what was loaded from allowedUsers.json and the member
+// roster file on every boot, by name - not just a count - so a manual edit
+// to either file is immediately, visibly confirmed (or its absence is
+// immediately obvious) in the same terminal `npm start` runs in, with
+// nothing left to take on faith.
+function logLoadedMasterData() {
+  const users = readAllowedUsers();
+  console.log(`[startup] allowedUsers.json: ${users.length} account(s) - ${users.map((u) => u.email).join(', ')}`);
+
+  const members = readMembers();
+  const membersSource = env.membersFile || '(default) data/members.json';
+  console.log(`[startup] Member roster source: ${membersSource}`);
+  console.log(`[startup] Member roster: ${members.length} member(s) loaded:`);
+  console.log(members.map((m) => `  ${m.id}: ${m.name}`).join('\n'));
+}
 
 async function start() {
   await connectDB();
@@ -14,10 +32,10 @@ async function start() {
   // payment/visitor records) is actually missing, every time the server
   // starts. See seed/ensureMasterData.js.
   await ensureMasterData();
+  logLoadedMasterData();
   app.listen(env.port, () => {
     console.log(`BNI App backend listening on port ${env.port}`);
   });
-  
 }
 
 start().catch((err) => {

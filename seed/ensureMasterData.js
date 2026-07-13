@@ -4,8 +4,8 @@
 // boot - each piece only inserts what's actually missing.
 //
 // Covers:
-//   1. The two login accounts (config/allowedUsers.js) - always kept in
-//      sync, unaffected by anything else this module does.
+//   1. The login accounts (config/allowedUsers.json) - always kept in sync,
+//      unaffected by anything else this module does.
 //   2. July 2026 member payment records + the July visitor placeholder,
 //      sourced from "WEEK AFTER WEEK PAYMENTS.xlsx" (see seedJulyOnly.js for
 //      the one-off destructive version this was derived from).
@@ -24,7 +24,7 @@ const ExcelJS = require('exceljs');
 const User = require('../models/User');
 const Payment = require('../models/Payment');
 const Visitor = require('../models/Visitor');
-const { ALLOWED_USERS } = require('../config/allowedUsers');
+const { readAllowedUsers } = require('../utils/allowedUsersData');
 const { readMembers } = require('../utils/membersData');
 
 const EXCEL_PATH = path.join(__dirname, '..', 'data', 'WEEK AFTER WEEK PAYMENTS.xlsx');
@@ -55,23 +55,38 @@ function randomPaidAt(year, month, day) {
   return new Date(year, month - 1, day, hour, minute, second);
 }
 
-// Always kept present and in sync - deletes any User not on the allowlist,
-// upserts the two allowed accounts. Untouched by the payment-data seeding
-// below (separate collection, separate logic).
+// Always kept present and in sync with config/allowedUsers.json - deletes
+// any User not on the allowlist, creates whatever's missing, and updates
+// any existing account whose name/password in the JSON no longer matches
+// what's stored (so editing an entry, not just adding one, takes effect on
+// the next restart with no code change). Untouched by the payment-data
+// seeding below (separate collection, separate logic).
 async function ensureUsers() {
-  const allowedEmails = ALLOWED_USERS.map((u) => u.email);
+  const allowedUsers = readAllowedUsers();
+  const allowedEmails = allowedUsers.map((u) => u.email);
   const { deletedCount } = await User.deleteMany({ email: { $nin: allowedEmails } });
   if (deletedCount > 0) console.log(`[seed] Removed ${deletedCount} account(s) not on the allowlist.`);
 
   let created = 0;
-  for (const { email, name, password } of ALLOWED_USERS) {
+  let updated = 0;
+  for (const { email, name, password } of allowedUsers) {
     const existing = await User.findOne({ email });
-    if (existing) continue; // already present - leave the existing hash alone
-    const passwordHash = await bcrypt.hash(password, 10);
-    await User.create({ email, name, passwordHash });
-    created += 1;
+    if (!existing) {
+      const passwordHash = await bcrypt.hash(password, 10);
+      await User.create({ email, name, passwordHash });
+      created += 1;
+      continue;
+    }
+
+    const passwordMatches = await bcrypt.compare(password, existing.passwordHash);
+    if (!passwordMatches || existing.name !== name) {
+      existing.name = name;
+      existing.passwordHash = await bcrypt.hash(password, 10);
+      await existing.save();
+      updated += 1;
+    }
   }
-  console.log(`[seed] Users: ${ALLOWED_USERS.length} allowed, ${created} newly created.`);
+  console.log(`[seed] Users: ${allowedUsers.length} allowed, ${created} newly created, ${updated} updated.`);
 }
 
 // Parses the July sheet into the same shape as seedJulyOnly.js, but never

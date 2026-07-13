@@ -1,9 +1,7 @@
 const bcrypt = require('bcryptjs');
 const User = require('../models/User');
 const { signToken } = require('../utils/jwt');
-const { ALLOWED_USERS } = require('../config/allowedUsers');
-
-const ALLOWED_EMAILS = new Set(ALLOWED_USERS.map((u) => u.email));
+const { readAllowedUsers } = require('../utils/allowedUsersData');
 
 async function login(req, res, next) {
   try {
@@ -14,9 +12,16 @@ async function login(req, res, next) {
 
     const normalizedEmail = email.toLowerCase().trim();
 
-    // Defense in depth: only the seeded employee accounts may ever receive a
-    // token, even if a stray User document exists in the database.
-    if (!ALLOWED_EMAILS.has(normalizedEmail)) {
+    // Defense in depth: only the accounts currently listed in
+    // allowedUsers.json may ever receive a token, even if a stray User
+    // document exists in the database. Read fresh on every login (not
+    // cached at module load) so an email added to the JSON file is
+    // recognized immediately, with no server restart required for this
+    // check specifically - though the account still needs a matching User
+    // document (see ensureMasterData.js) to actually pass the password
+    // check below.
+    const allowedEmails = new Set(readAllowedUsers().map((u) => u.email));
+    if (!allowedEmails.has(normalizedEmail)) {
       return res.status(401).json({ message: 'Invalid email or password' });
     }
 
