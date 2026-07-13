@@ -4,9 +4,6 @@ const { getOrCreateSettings } = require('../utils/getSettings');
 const { buildVisitorStatus } = require('../utils/paymentCalculator');
 const { validateMethodFields } = require('./paymentController');
 
-const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const PHONE_REGEX = /^\+?[0-9\s-]{7,15}$/;
-
 async function createVisitor(req, res, next) {
   try {
     const { memberId, name, email, phone } = req.body;
@@ -17,20 +14,16 @@ async function createVisitor(req, res, next) {
     if (!name || !name.trim()) {
       return res.status(400).json({ message: 'Visitor name is required' });
     }
-    if (!EMAIL_REGEX.test(email || '')) {
-      return res.status(400).json({ message: 'A valid email is required' });
-    }
-    if (!PHONE_REGEX.test(phone || '')) {
-      return res.status(400).json({ message: 'A valid phone number is required' });
-    }
+    // email/phone are optional and unvalidated by design - whatever's
+    // provided (including nothing) is stored as-is.
 
     const settings = await getOrCreateSettings();
 
     const visitor = await Visitor.create({
       memberId,
       name: name.trim(),
-      email: email.trim().toLowerCase(),
-      phone: phone.trim(),
+      email: (email || '').trim().toLowerCase(),
+      phone: (phone || '').trim(),
     });
 
     res.status(201).json({ visitor: buildVisitorStatus(visitor, settings.visitorFee) });

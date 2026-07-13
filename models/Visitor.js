@@ -27,8 +27,10 @@ const visitorSchema = new mongoose.Schema(
   {
     memberId: { type: String, required: true, index: true },
     name: { type: String, required: true, trim: true },
-    email: { type: String, required: true, trim: true, lowercase: true },
-    phone: { type: String, required: true, trim: true },
+    // Optional by design - createVisitor no longer requires a valid email/
+    // phone to add a visitor, only a name.
+    email: { type: String, trim: true, lowercase: true, default: '' },
+    phone: { type: String, trim: true, default: '' },
     payments: { type: [visitorPaymentSchema], default: [] },
   },
   { timestamps: true }
