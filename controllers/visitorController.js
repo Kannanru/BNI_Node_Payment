@@ -32,6 +32,7 @@ async function createVisitor(req, res, next) {
   }
 }
 
+
 async function listVisitorsForMember(req, res, next) {
   try {
     const { memberId } = req.query;
