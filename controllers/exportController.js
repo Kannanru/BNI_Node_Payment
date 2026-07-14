@@ -1,8 +1,14 @@
 const ExcelJS = require('exceljs');
 const { getOrCreateSettings } = require('../utils/getSettings');
-const { buildMemberExportSheet, MONTH_GROUP_HEADERS, VISITOR_GROUP_HEADERS } = require('../utils/exportBuilder');
+const {
+  buildMemberExportSheet,
+  buildTransactionExportSheet,
+  MONTH_GROUP_HEADERS,
+  VISITOR_GROUP_HEADERS,
+} = require('../utils/exportBuilder');
 
 const MONTH_KEY_REGEX = /^\d{4}-(0[1-9]|1[0-2])$/;
+const DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 const LEAD_COLUMN_COUNT = 5; // Member Name, Total Expected/Paid/Pending, Overall Status
 
 // GET /api/export?from=YYYY-MM&to=YYYY-MM - "from"/"to" are the From Month /
@@ -77,4 +83,53 @@ async function exportReport(req, res, next) {
   }
 }
 
-module.exports = { exportReport };
+// GET /api/export/by-date?from=YYYY-MM-DD&to=YYYY-MM-DD - a single date is
+// selected by passing the same value for from and to. Unlike exportReport,
+// this is a flat transaction list (one row per payment) restricted to the
+// exact instant range, so a range narrower than a full month only includes
+// what was actually paid during it.
+async function exportTransactionsByDate(req, res, next) {
+  try {
+    const { from, to } = req.query;
+    if (!DATE_REGEX.test(from || '') || !DATE_REGEX.test(to || '')) {
+      return res.status(400).json({ message: 'from and to query params (YYYY-MM-DD) are required' });
+    }
+    if (from > to) {
+      return res.status(400).json({ message: 'Invalid date range: from must be <= to' });
+    }
+
+    const fromDate = new Date(`${from}T00:00:00`);
+    const toDate = new Date(`${to}T23:59:59.999`);
+
+    const { headers, rows } = await buildTransactionExportSheet({ fromDate, toDate });
+
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = 'BNI App';
+    workbook.created = new Date();
+
+    const sheet = workbook.addWorksheet('Payment Report');
+    sheet.columns = headers.map((header) => ({
+      header,
+      width: header.length > 18 ? 22 : 16,
+    }));
+    sheet.getRow(1).font = { bold: true };
+    sheet.views = [{ state: 'frozen', xSplit: 1, ySplit: 1 }];
+    sheet.autoFilter = {
+      from: { row: 1, column: 1 },
+      to: { row: 1, column: headers.length },
+    };
+
+    for (const row of rows) sheet.addRow(row);
+
+    const fileName = from === to ? `bni-payment-report_${from}.xlsx` : `bni-payment-report_${from}_to_${to}.xlsx`;
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+
+    await workbook.xlsx.write(res);
+    res.end();
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = { exportReport, exportTransactionsByDate };

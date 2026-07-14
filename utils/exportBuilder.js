@@ -238,4 +238,83 @@ async function buildMemberExportSheet({ fromMonth, toMonth, settings }) {
   return { headers, rows, monthGroupCount: monthList.length, visitorGroupCount: maxVisitors };
 }
 
-module.exports = { buildMemberExportSheet, MONTH_GROUP_HEADERS, VISITOR_GROUP_HEADERS };
+const TRANSACTION_HEADERS = [
+  'Member Name',
+  'Payment Type',
+  'Visitor Name',
+  'Amount',
+  'Payment Method',
+  'Date/Time',
+  'Collected By',
+  'Remarks',
+];
+
+// Builds one row per individual payment transaction (member fee or visitor
+// fee) whose paidAt falls within the inclusive [fromDate, toDate] instant
+// range - unlike buildMemberExportSheet, this is exact to the moment rather
+// than bucketed by calendar month, so a range narrower than a full month
+// only pulls in the transactions actually paid during it.
+async function buildTransactionExportSheet({ fromDate, toDate }) {
+  const members = readMembers();
+  const memberById = new Map(members.map((m) => [m.id, m]));
+  const memberIds = members.map((m) => m.id);
+
+  const [payments, visitors] = await Promise.all([
+    Payment.find({ memberId: { $in: memberIds }, paidAt: { $gte: fromDate, $lte: toDate } })
+      .lean(),
+    Visitor.find({ memberId: { $in: memberIds }, 'payments.paidAt': { $gte: fromDate, $lte: toDate } })
+      .lean(),
+  ]);
+
+  const entries = [];
+
+  for (const payment of payments) {
+    const member = memberById.get(payment.memberId);
+    entries.push({
+      paidAt: payment.paidAt,
+      row: [
+        member ? member.name : payment.memberId,
+        'Member Fee',
+        '',
+        payment.amount,
+        methodLabel(payment.method),
+        formatDateTime(payment.paidAt),
+        payment.recordedByName || payment.recordedByEmail || '',
+        payment.remarks || payment.editReason || '',
+      ],
+    });
+  }
+
+  for (const visitor of visitors) {
+    const member = memberById.get(visitor.memberId);
+    for (const t of visitor.payments || []) {
+      const paidAt = new Date(t.paidAt);
+      if (paidAt < fromDate || paidAt > toDate) continue;
+      entries.push({
+        paidAt,
+        row: [
+          member ? member.name : visitor.memberId,
+          'Visitor Fee',
+          visitor.name,
+          t.amount,
+          methodLabel(t.method),
+          formatDateTime(t.paidAt),
+          t.recordedByName || t.recordedByEmail || '',
+          t.remarks || t.editReason || '',
+        ],
+      });
+    }
+  }
+
+  entries.sort((a, b) => new Date(a.paidAt) - new Date(b.paidAt));
+
+  return { headers: TRANSACTION_HEADERS, rows: entries.map((e) => e.row) };
+}
+
+module.exports = {
+  buildMemberExportSheet,
+  buildTransactionExportSheet,
+  MONTH_GROUP_HEADERS,
+  VISITOR_GROUP_HEADERS,
+  TRANSACTION_HEADERS,
+};
