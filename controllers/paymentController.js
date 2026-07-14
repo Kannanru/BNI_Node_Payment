@@ -2,7 +2,7 @@ const Payment = require('../models/Payment');
 const Visitor = require('../models/Visitor');
 const { findMemberById } = require('../utils/membersData');
 const { getOrCreateSettings } = require('../utils/getSettings');
-const { getPendingVisitorsForMonth } = require('../utils/paymentCalculator');
+const { getPendingChargesForMonth } = require('../utils/paymentCalculator');
 
 const VALID_METHODS = ['upi', 'card', 'cash'];
 
@@ -21,16 +21,18 @@ function validateMethodFields(method, cardLastFour) {
 // e.g. 2,000 via Cash and 3,000 via UPI both count toward April - so this
 // always inserts rather than upserting a single row.
 //
-// If the member has any pending visitor fee(s) incurred during that same
+// If the member has any pending visitor charge(s) incurred during that same
 // month, the paid amount is automatically applied to the membership fee
-// FIRST, and whatever's left over spills into those visitor fee(s) (oldest
-// first) - so admins can pay a member's combined "month + visitor" total in
-// one go instead of two separate flows. Everything is recomputed fresh from
-// the DB on every call (not just trusted from the request), so a payment
-// split across several methods - which the mobile app sends as one
-// recordPayment call per method, awaited in sequence - still allocates
-// correctly call-by-call. When there are no pending visitors for the month,
-// behaviour is byte-for-byte identical to before this feature existed.
+// FIRST, and whatever's left over spills into those visitor charges (oldest
+// first, each filled in full before moving to the next - see
+// getPendingChargesForMonth) - so admins can pay a member's combined
+// "month + visitor" total in one go instead of two separate flows.
+// Everything is recomputed fresh from the DB on every call (not just
+// trusted from the request), so a payment split across several methods -
+// which the mobile app sends as one recordPayment call per method, awaited
+// in sequence - still allocates correctly call-by-call. When there are no
+// pending visitor charges for the month, behaviour is byte-for-byte
+// identical to before this feature existed.
 async function recordPayment(req, res, next) {
   try {
     const { memberId, month, method, amount, cardLastFour, remarks, transactionRef } = req.body;
@@ -68,14 +70,14 @@ async function recordPayment(req, res, next) {
     ]);
     const monthPaid = monthPayments.reduce((sum, p) => sum + p.amount, 0);
     const monthRemaining = Math.max(settings.monthlyFee - monthPaid, 0);
-    const pendingVisitors = getPendingVisitorsForMonth(
+    const pendingCharges = getPendingChargesForMonth(
       memberVisitors,
       month,
       settings.visitorFee,
       settings.visitorPaymentStartDate
     );
 
-    if (pendingVisitors.length === 0) {
+    if (pendingCharges.length === 0) {
       // Unchanged fast path - no visitor charges to fold in this month.
       const payment = await Payment.create({
         memberId,
@@ -106,13 +108,18 @@ async function recordPayment(req, res, next) {
           })
         : null;
 
-    for (const visitor of pendingVisitors) {
+    for (const charge of pendingCharges) {
       if (toAllocate <= 0) break;
-      const portion = Math.min(toAllocate, visitor.remaining);
+      const portion = Math.min(toAllocate, charge.remaining);
       if (portion <= 0) continue;
-      await Visitor.findByIdAndUpdate(visitor.id, {
-        $push: { payments: { method, amount: portion, paidAt: new Date(), ...cardFields, ...attributionFields } },
-      });
+      await Visitor.findOneAndUpdate(
+        { _id: charge.visitorId, 'charges._id': charge.chargeId },
+        {
+          $push: {
+            'charges.$.payments': { method, amount: portion, paidAt: new Date(), ...cardFields, ...attributionFields },
+          },
+        }
+      );
       toAllocate -= portion;
     }
 

@@ -26,6 +26,7 @@ const Payment = require('../models/Payment');
 const Visitor = require('../models/Visitor');
 const { readAllowedUsers } = require('../utils/allowedUsersData');
 const { readMembers } = require('../utils/membersData');
+const { getOrCreateSettings } = require('../utils/getSettings');
 
 const EXCEL_PATH = path.join(__dirname, '..', 'data', 'WEEK AFTER WEEK PAYMENTS.xlsx');
 const SHEET_NAME = 'july 26';
@@ -153,15 +154,28 @@ async function parseJulySheet() {
       visitorRowIndex += 1;
       if (!transactions.length) continue;
       const label = visitorRowTotal > 1 ? `Visitor ${visitorRowIndex} - ${MONTH_KEY}` : `Visitor 1 - ${MONTH_KEY}`;
+      const chargePayments = transactions.map(({ amount, method, dateStr: ds }) => {
+        const { year, month, day } = parseSheetDate(ds);
+        return { _id: new mongoose.Types.ObjectId(), method, amount, paidAt: randomPaidAt(year, month, day) };
+      });
+      // A single charge covering everything this placeholder already paid -
+      // its amount is the sum of its own payments (rather than looking up a
+      // fee that wasn't tracked per-visitor at the time), so it reports as
+      // fully Paid, matching how this placeholder has always behaved.
+      const chargeAmount = chargePayments.reduce((sum, p) => sum + p.amount, 0);
       visitorDocs.push({
         memberId: viswanathanId,
         name: label,
         email: `visitor.${MONTH_KEY.replace('-', '')}.${visitorRowIndex}@placeholder.bni-agaram.local`,
         phone: '0000000000',
-        payments: transactions.map(({ amount, method, dateStr: ds }) => {
-          const { year, month, day } = parseSheetDate(ds);
-          return { _id: new mongoose.Types.ObjectId(), method, amount, paidAt: randomPaidAt(year, month, day) };
-        }),
+        charges: [
+          {
+            _id: new mongoose.Types.ObjectId(),
+            amount: chargeAmount,
+            effectiveFrom: new Date(2026, 6, 1, 9, 0, 0),
+            payments: chargePayments,
+          },
+        ],
       });
       continue;
     }
@@ -232,9 +246,31 @@ async function ensureJulyPaymentData() {
   );
 }
 
+// Backfill for a visitor with no charges at all yet - shouldn't happen via
+// createVisitor/ensureJulyPaymentData, which both always seed one charge up
+// front, but kept as a defensive safety net. Deliberately ONLY touches a
+// visitor whose charges array is genuinely empty, never one that already
+// has charges (even just one) - so this can never overwrite or lose real
+// payment history already recorded against an existing charge, no matter
+// how many times it runs.
+async function ensureVisitorCharges() {
+  const settings = await getOrCreateSettings();
+
+  const emptyChargeVisitors = await Visitor.find({
+    $or: [{ charges: { $exists: false } }, { charges: { $size: 0 } }],
+  });
+  for (const visitor of emptyChargeVisitors) {
+    visitor.charges = [{ amount: settings.visitorFee, effectiveFrom: visitor.createdAt, payments: [] }];
+    await visitor.save();
+  }
+
+  console.log(`[seed] Visitor charges: backfilled ${emptyChargeVisitors.length} visitor(s) with no charges at all.`);
+}
+
 async function ensureMasterData() {
   await ensureUsers();
   await ensureJulyPaymentData();
+  await ensureVisitorCharges();
 }
 
-module.exports = { ensureMasterData, ensureUsers, ensureJulyPaymentData };
+module.exports = { ensureMasterData, ensureUsers, ensureJulyPaymentData, ensureVisitorCharges };

@@ -18,11 +18,23 @@ const visitorPaymentSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// The visitor fee itself is never stored here - it's always read live from
-// Settings.visitorFee (see utils/paymentCalculator.js buildVisitorStatus), so
-// raising/lowering the fee immediately applies to every outstanding visitor
-// charge instead of freezing at whatever the fee was when the visitor was
-// added.
+// One amount this visitor was billed, the date it became due, and its own
+// independent payment history. A visitor gets exactly one charge, fixed at
+// whatever Settings.visitorFee was at the moment THEY were created (see
+// visitorController.js's createVisitor) - later changes to
+// Settings.visitorFee only affect visitors created after that point, never
+// this one. Structured as an array (rather than a single amount on the
+// visitor itself) so a future charge type isn't precluded, and so payments
+// stay scoped to the specific charge they paid off. Keeps its default _id
+// so the API/UI can address a specific charge to pay.
+const visitorChargeSchema = new mongoose.Schema(
+  {
+    amount: { type: Number, required: true, min: 0 },
+    effectiveFrom: { type: Date, required: true, default: Date.now },
+    payments: { type: [visitorPaymentSchema], default: [] },
+  }
+);
+
 const visitorSchema = new mongoose.Schema(
   {
     memberId: { type: String, required: true, index: true },
@@ -31,7 +43,11 @@ const visitorSchema = new mongoose.Schema(
     // phone to add a visitor, only a name.
     email: { type: String, trim: true, lowercase: true, default: '' },
     phone: { type: String, trim: true, default: '' },
-    payments: { type: [visitorPaymentSchema], default: [] },
+    // Every payment now lives under the specific charge it paid off (see
+    // visitorChargeSchema above) - there is deliberately no flat top-level
+    // payments array any more, so a payment can never be ambiguous about
+    // which due record it belongs to.
+    charges: { type: [visitorChargeSchema], default: [] },
   },
   { timestamps: true }
 );

@@ -25,7 +25,10 @@ const DEFAULTS = {
 async function getOrCreateSettings() {
   let settings = await Settings.findOne({ key: 'app_settings' });
   if (!settings) {
-    settings = await Settings.create(DEFAULTS);
+    settings = await Settings.create({
+      ...DEFAULTS,
+      visitorFeeHistory: [{ amount: DEFAULTS.visitorFee, effectiveFrom: new Date() }],
+    });
     return settings;
   }
 
@@ -52,6 +55,17 @@ async function getOrCreateSettings() {
   if (!settings.columnDisplayStartMonth) {
     const now = new Date();
     settings.columnDisplayStartMonth = monthKeyOf(now.getFullYear(), now.getMonth() + 1);
+    needsSave = true;
+  }
+  // Backfill for a Settings document that predates visitorFeeHistory - seed
+  // it with the current visitorFee, dated to whenever this document was
+  // first created (the earliest point that amount is known to have applied
+  // from), rather than "now" which would misrepresent it as a brand new
+  // change.
+  if (!settings.visitorFeeHistory || settings.visitorFeeHistory.length === 0) {
+    settings.visitorFeeHistory = [
+      { amount: settings.visitorFee, effectiveFrom: settings.createdAt || new Date() },
+    ];
     needsSave = true;
   }
   if (needsSave) await settings.save();

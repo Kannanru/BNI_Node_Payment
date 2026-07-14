@@ -78,21 +78,57 @@ function buildMonthsResult(monthList, memberPaymentsByMonth, totalDue) {
   return { monthsResult, pendingAmount };
 }
 
-// A visitor's fee is always evaluated against the CURRENT Settings.visitorFee
-// rather than a value frozen at creation time - there's no separate "amount"
-// stored on the Visitor document, so raising/lowering the fee immediately
-// changes every outstanding visitor charge, mirroring how a month's totalDue
-// always uses the current monthlyFee. Structurally this mirrors
-// buildMonthsResult: sum the visitor's own payment transactions, and the fee
-// stays 'pending' until they cover the current visitorFee.
+// Every charge this visitor has ever been billed (see Visitor.js's
+// visitorChargeSchema) - ordinarily just one, fixed at whatever
+// Settings.visitorFee was when the visitor was created (see
+// visitorController.js's createVisitor), unaffected by any later
+// Settings.visitorFee change. Each charge's paid/remaining/status comes
+// only from its OWN nested payments array. [visitorFee] is only a
+// fallback, synthesizing a single implicit (unpaid) charge for a visitor
+// that somehow has none stored yet - should only matter in tests, since
+// createVisitor always seeds one.
+function chargesWithStatus(visitor, visitorFee) {
+  const stored = visitor.charges && visitor.charges.length > 0
+    ? visitor.charges
+    : [{ amount: visitorFee, effectiveFrom: visitor.createdAt, payments: [] }];
+  const sorted = [...stored].sort((a, b) => new Date(a.effectiveFrom) - new Date(b.effectiveFrom));
+
+  return sorted.map((charge) => {
+    const transactions = charge.payments || [];
+    const paid = transactions.reduce((sum, t) => sum + t.amount, 0);
+    const remaining = Math.max(charge.amount - paid, 0);
+    const latestPaidAt = transactions.length
+      ? transactions.reduce((latest, t) => (t.paidAt > latest ? t.paidAt : latest), transactions[0].paidAt)
+      : null;
+    return {
+      id: charge._id,
+      amount: charge.amount,
+      effectiveFrom: charge.effectiveFrom,
+      paid,
+      remaining,
+      status: remaining <= 0 ? 'paid' : 'pending',
+      paidAt: latestPaidAt,
+      payments: transactions.map(mapPaymentEntry),
+    };
+  });
+}
+
+// A visitor's total due is the sum of every charge they've ever been billed
+// (see chargesWithStatus above) - ordinarily just the one amount fixed at
+// creation time, never a value read live off Settings on every request, so
+// a later Settings.visitorFee change can neither retroactively "unpay" a
+// charge this visitor already settled nor add a new one to them - it only
+// ever affects visitors created after that point. The aggregate amount/
+// remaining/status below is purely a sum across charges for list-view
+// display - actually paying always targets one specific charge (see
+// visitorController.js's recordVisitorPayment).
 function buildVisitorStatus(visitor, visitorFee) {
-  const transactions = visitor.payments || [];
-  const amountPaid = transactions.reduce((sum, t) => sum + t.amount, 0);
-  const remaining = Math.max(visitorFee - amountPaid, 0);
+  const charges = chargesWithStatus(visitor, visitorFee);
+  const totalDue = charges.reduce((sum, c) => sum + c.amount, 0);
+  const amountPaid = charges.reduce((sum, c) => sum + c.paid, 0);
+  const remaining = charges.reduce((sum, c) => sum + c.remaining, 0);
   const isPaid = remaining <= 0;
-  const latestPaidAt = transactions.length
-    ? transactions.reduce((latest, t) => (t.paidAt > latest ? t.paidAt : latest), transactions[0].paidAt)
-    : null;
+  const latestPaidAt = charges.reduce((latest, c) => (c.paidAt && (!latest || c.paidAt > latest) ? c.paidAt : latest), null);
 
   return {
     id: visitor._id,
@@ -101,11 +137,17 @@ function buildVisitorStatus(visitor, visitorFee) {
     phone: visitor.phone,
     createdAt: visitor.createdAt,
     status: isPaid ? 'paid' : 'pending',
-    totalDue: visitorFee,
+    totalDue,
     amount: amountPaid,
     remaining,
     paidAt: latestPaidAt,
-    payments: transactions.map(mapPaymentEntry),
+    // Flattened across every charge, newest-transaction-first is NOT
+    // assumed by any caller - kept purely for backward-compatible callers
+    // that want "every payment this visitor ever made" as one list (e.g.
+    // exportBuilder.js's transaction-level report already reads each
+    // charge's payments directly instead, this is for anything simpler).
+    payments: charges.flatMap((c) => c.payments),
+    charges,
   };
 }
 
@@ -131,14 +173,24 @@ function visitorMonthKey(visitor) {
   return monthKeyOf(created.getFullYear(), created.getMonth() + 1);
 }
 
-// Every still-outstanding visitor fee this member incurred during [monthKey]
-// - powers "paying this month also settles that month's visitor charges"
-// (see recordPayment) and any UI that needs to show the combined total.
-function getPendingVisitorsForMonth(memberVisitors, monthKey, visitorFee, visitorPaymentStartDate) {
-  return memberVisitors
-    .filter((v) => visitorMonthKey(v) === monthKey && isVisitorInScope(v, visitorPaymentStartDate))
-    .map((v) => buildVisitorStatus(v, visitorFee))
-    .filter((v) => v.remaining > 0);
+// Every still-outstanding visitor CHARGE (not visitor - a visitor can have
+// several independent charges, see Visitor.js) this member incurred during
+// [monthKey], oldest charge first - powers "paying this month also settles
+// that month's visitor charges" (see recordPayment), filling each pending
+// charge in full before spilling into the next rather than splitting one
+// payment thinly across several of a visitor's due records at once.
+function getPendingChargesForMonth(memberVisitors, monthKey, visitorFee, visitorPaymentStartDate) {
+  const inScope = memberVisitors.filter(
+    (v) => visitorMonthKey(v) === monthKey && isVisitorInScope(v, visitorPaymentStartDate)
+  );
+  const pendingCharges = [];
+  for (const visitor of inScope) {
+    const { id: visitorId, charges } = buildVisitorStatus(visitor, visitorFee);
+    for (const charge of charges) {
+      if (charge.remaining > 0) pendingCharges.push({ visitorId, chargeId: charge.id, remaining: charge.remaining });
+    }
+  }
+  return pendingCharges;
 }
 
 // Builds the Home-screen member list. Two independent month windows are in
@@ -244,7 +296,8 @@ module.exports = {
   buildMemberHistory,
   buildMemberPendingMonths,
   buildVisitorStatus,
-  getPendingVisitorsForMonth,
+  getPendingChargesForMonth,
   visitorMonthKey,
   isVisitorInScope,
 };
+

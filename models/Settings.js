@@ -19,13 +19,32 @@ const settingsSchema = new mongoose.Schema(
     columnDisplayStartMonth: { type: String, required: true, match: /^\d{4}-(0[1-9]|1[0-2])$/ },
     monthlyFee: { type: Number, required: true, min: 0 },
     visitorFee: { type: Number, required: true, min: 0 },
+    // Every value visitorFee has ever been set to, each with the date it
+    // became effective - visitorFee itself always holds the latest entry's
+    // amount (every existing read of visitorFee, e.g. buildVisitorStatus,
+    // is unaffected), this is purely an audit trail so the Settings screen
+    // can show "which amount applies as of which date". Deliberately
+    // visitor-only - monthlyFee (Members) has no equivalent history.
+    visitorFeeHistory: {
+      type: [
+        {
+          _id: false,
+          amount: { type: Number, required: true, min: 0 },
+          effectiveFrom: { type: Date, required: true },
+        },
+      ],
+      default: [],
+    },
     // The full date (day precision) members' payment tracking starts from -
     // the source of truth defaultStartMonth is derived from.
     memberPaymentStartDate: { type: Date, required: true },
     // Visitors added before this date are excluded from every pending/owed
     // calculation app-wide (see paymentCalculator.js's isVisitorInScope) -
     // i.e. visitors added before the org started tracking visitor fees are
-    // grandfathered in rather than retroactively owing anything.
+    // grandfathered in rather than retroactively owing anything. No longer
+    // editable from the Settings screen (Visitor config has no Starting
+    // Month field), but still stored/enforced - it keeps whatever value it
+    // already has unless a future internal process changes it.
     visitorPaymentStartDate: { type: Date, required: true },
   },
   { timestamps: true }

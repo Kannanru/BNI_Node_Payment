@@ -2,7 +2,7 @@ const Payment = require('../models/Payment');
 const Visitor = require('../models/Visitor');
 const { readMembers } = require('./membersData');
 const { buildMonthRangeBetween, monthKeyOf, parseMonthKey, shortMonthYearLabel } = require('./monthRange');
-const { visitorMonthKey, isVisitorInScope } = require('./paymentCalculator');
+const { visitorMonthKey, isVisitorInScope, buildVisitorStatus } = require('./paymentCalculator');
 
 function formatDate(date) {
   if (!date) return '';
@@ -65,26 +65,30 @@ function monthCells(transactions, monthlyFee) {
 }
 
 // One visitor's column-group values: Name, Contact, Status, Paid, Pending,
-// Payment Date/Time, Method, Collected By, Remarks.
+// Payment Date/Time, Method, Collected By, Remarks. Uses buildVisitorStatus
+// (the same charge-aware totalDue/remaining every other visitor-facing view
+// uses) rather than a flat visitorFee, so a visitor with more than one
+// charge on record - see Visitor.js's visitorChargeSchema - reports the
+// same total here as everywhere else.
 function visitorCells(visitor, visitorFee) {
-  const transactions = visitor.payments || [];
-  const paid = transactions.reduce((sum, t) => sum + t.amount, 0);
-  const remaining = Math.max(visitorFee - paid, 0);
+  const status = buildVisitorStatus(visitor, visitorFee);
+  const transactions = status.payments;
   const contact = [visitor.email, visitor.phone].filter(Boolean).join(' / ');
   return {
     cells: [
       visitor.name,
       contact,
-      statusOf(paid, visitorFee),
-      paid,
-      remaining,
+      statusOf(status.amount, status.totalDue),
+      status.amount,
+      status.remaining,
       joinAll(transactions.map((t) => formatDateTime(t.paidAt))),
       joinUnique(transactions.map((t) => methodLabel(t.method))),
       joinUnique(transactions.map((t) => t.recordedByName)),
       joinAll(transactions.map((t) => t.remarks || t.editReason)),
     ],
-    paid,
-    remaining,
+    totalDue: status.totalDue,
+    paid: status.amount,
+    remaining: status.remaining,
   };
 }
 
@@ -149,7 +153,9 @@ async function buildMemberExportSheet({ fromMonth, toMonth, settings }) {
     );
     return memberVisitors.filter((v) => {
       const incurredInRange = monthKeySet.has(visitorMonthKey(v));
-      const hasTxInRange = (v.payments || []).some((t) => monthKeySet.has(paidAtMonthKey(t.paidAt)));
+      const hasTxInRange = (v.charges || []).some((c) =>
+        (c.payments || []).some((t) => monthKeySet.has(paidAtMonthKey(t.paidAt)))
+      );
       return incurredInRange || hasTxInRange;
     });
   }
@@ -212,14 +218,16 @@ async function buildMemberExportSheet({ fromMonth, toMonth, settings }) {
         visitorGroupCells.push(...VISITOR_GROUP_HEADERS.map(() => ''));
         continue;
       }
-      const { cells, paid, remaining } = visitorCells(visitor, settings.visitorFee);
-      totalExpected += settings.visitorFee;
+      const { cells, totalDue, paid, remaining } = visitorCells(visitor, settings.visitorFee);
+      totalExpected += totalDue;
       totalPaid += paid;
       totalPending += remaining;
       visitorGroupCells.push(...cells);
-      for (const t of visitor.payments || []) {
-        const collector = t.recordedByName || t.recordedByEmail;
-        if (collector) collectors.add(collector);
+      for (const charge of visitor.charges || []) {
+        for (const t of charge.payments || []) {
+          const collector = t.recordedByName || t.recordedByEmail;
+          if (collector) collectors.add(collector);
+        }
       }
     }
 
@@ -262,7 +270,7 @@ async function buildTransactionExportSheet({ fromDate, toDate }) {
   const [payments, visitors] = await Promise.all([
     Payment.find({ memberId: { $in: memberIds }, paidAt: { $gte: fromDate, $lte: toDate } })
       .lean(),
-    Visitor.find({ memberId: { $in: memberIds }, 'payments.paidAt': { $gte: fromDate, $lte: toDate } })
+    Visitor.find({ memberId: { $in: memberIds }, 'charges.payments.paidAt': { $gte: fromDate, $lte: toDate } })
       .lean(),
   ]);
 
@@ -287,22 +295,24 @@ async function buildTransactionExportSheet({ fromDate, toDate }) {
 
   for (const visitor of visitors) {
     const member = memberById.get(visitor.memberId);
-    for (const t of visitor.payments || []) {
-      const paidAt = new Date(t.paidAt);
-      if (paidAt < fromDate || paidAt > toDate) continue;
-      entries.push({
-        paidAt,
-        row: [
-          member ? member.name : visitor.memberId,
-          'Visitor Fee',
-          visitor.name,
-          t.amount,
-          methodLabel(t.method),
-          formatDateTime(t.paidAt),
-          t.recordedByName || t.recordedByEmail || '',
-          t.remarks || t.editReason || '',
-        ],
-      });
+    for (const charge of visitor.charges || []) {
+      for (const t of charge.payments || []) {
+        const paidAt = new Date(t.paidAt);
+        if (paidAt < fromDate || paidAt > toDate) continue;
+        entries.push({
+          paidAt,
+          row: [
+            member ? member.name : visitor.memberId,
+            'Visitor Fee',
+            visitor.name,
+            t.amount,
+            methodLabel(t.method),
+            formatDateTime(t.paidAt),
+            t.recordedByName || t.recordedByEmail || '',
+            t.remarks || t.editReason || '',
+          ],
+        });
+      }
     }
   }
 
