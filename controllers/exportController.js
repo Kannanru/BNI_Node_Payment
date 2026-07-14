@@ -11,6 +11,43 @@ const MONTH_KEY_REGEX = /^\d{4}-(0[1-9]|1[0-2])$/;
 const DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 const LEAD_COLUMN_COUNT = 5; // Member Name, Total Expected/Paid/Pending, Overall Status
 
+const HEADER_FILL = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFB0122A' } };
+const BAND_FILL = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF7F3F4' } };
+const THIN_GREY = { style: 'thin', color: { argb: 'FFD9D9D9' } };
+const CELL_BORDER = { top: THIN_GREY, left: THIN_GREY, bottom: THIN_GREY, right: THIN_GREY };
+
+// Turns a bare ExcelJS table (plain header row + data rows) into one with
+// visible breathing room between cells: a bold white-on-red header row,
+// thin grey borders on every cell, light banding on alternate data rows,
+// and right-aligned/comma-formatted numbers - instead of default Excel
+// styling where every cell touches its neighbour with no visual separation.
+function styleReportSheet(sheet, { amountColumns = [] } = {}) {
+  const headerRow = sheet.getRow(1);
+  headerRow.height = 24;
+  headerRow.eachCell({ includeEmpty: true }, (cell) => {
+    cell.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+    cell.fill = HEADER_FILL;
+    cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+    cell.border = CELL_BORDER;
+  });
+
+  for (let rowNumber = 2; rowNumber <= sheet.rowCount; rowNumber += 1) {
+    const row = sheet.getRow(rowNumber);
+    row.height = 20;
+    const isBanded = rowNumber % 2 === 0;
+    row.eachCell({ includeEmpty: true }, (cell, colNumber) => {
+      cell.border = CELL_BORDER;
+      cell.alignment = {
+        vertical: 'middle',
+        horizontal: amountColumns.includes(colNumber) ? 'right' : 'left',
+        wrapText: false,
+      };
+      if (isBanded) cell.fill = BAND_FILL;
+      if (amountColumns.includes(colNumber)) cell.numFmt = '#,##0';
+    });
+  }
+}
+
 // GET /api/export?from=YYYY-MM&to=YYYY-MM - "from"/"to" are the From Month /
 // To Month selected on the Export screen, inclusive on both ends. One row
 // per member; every month in range and every relevant visitor gets its own
@@ -108,18 +145,19 @@ async function exportTransactionsByDate(req, res, next) {
     workbook.created = new Date();
 
     const sheet = workbook.addWorksheet('Payment Report');
+    const columnWidths = { 'Member Name': 26, 'Visitor Name': 22, 'Date/Time': 20, 'Collected By': 18, 'Remarks': 30 };
     sheet.columns = headers.map((header) => ({
       header,
-      width: header.length > 18 ? 22 : 16,
+      width: columnWidths[header] || 16,
     }));
-    sheet.getRow(1).font = { bold: true };
-    sheet.views = [{ state: 'frozen', xSplit: 1, ySplit: 1 }];
+    sheet.views = [{ state: 'frozen', xSplit: 0, ySplit: 1 }];
     sheet.autoFilter = {
       from: { row: 1, column: 1 },
       to: { row: 1, column: headers.length },
     };
 
     for (const row of rows) sheet.addRow(row);
+    styleReportSheet(sheet, { amountColumns: [headers.indexOf('Amount') + 1] });
 
     const fileName = from === to ? `bni-payment-report_${from}.xlsx` : `bni-payment-report_${from}_to_${to}.xlsx`;
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
