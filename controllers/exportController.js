@@ -135,8 +135,13 @@ async function exportTransactionsByDate(req, res, next) {
       return res.status(400).json({ message: 'Invalid date range: from must be <= to' });
     }
 
-    const fromDate = new Date(`${from}T00:00:00`);
-    const toDate = new Date(`${to}T23:59:59.999`);
+    // +05:30 makes these unambiguous IST instants regardless of the server
+    // process's own timezone - without it, a UTC server would interpret
+    // "T00:00:00" as UTC midnight (5:30 hours earlier than IST midnight),
+    // silently dropping early-morning IST payments from "today" and pulling
+    // in ones from the following IST day instead.
+    const fromDate = new Date(`${from}T00:00:00+05:30`);
+    const toDate = new Date(`${to}T23:59:59.999+05:30`);
 
     const { headers, rows } = await buildTransactionExportSheet({ fromDate, toDate });
 

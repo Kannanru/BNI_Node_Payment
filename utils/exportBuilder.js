@@ -4,15 +4,22 @@ const { readMembers } = require('./membersData');
 const { buildMonthRangeBetween, monthKeyOf, parseMonthKey, shortMonthYearLabel } = require('./monthRange');
 const { visitorMonthKey, isVisitorInScope, buildVisitorStatus } = require('./paymentCalculator');
 
+// Both explicitly pin timeZone to Asia/Kolkata rather than relying on the
+// server process's local timezone (toLocaleDateString/toLocaleTimeString
+// default to it when no timeZone is given) - a server running in UTC would
+// otherwise print payment times ~5:30 hours off from the IST time they were
+// actually recorded in.
 function formatDate(date) {
   if (!date) return '';
-  return new Date(date).toLocaleDateString('en-CA'); // YYYY-MM-DD
+  return new Date(date).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }); // YYYY-MM-DD
 }
 
 function formatDateTime(date) {
   if (!date) return '';
   const d = new Date(date);
-  return `${d.toLocaleDateString('en-CA')} ${d.toLocaleTimeString('en-GB')}`;
+  const datePart = d.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+  const timePart = d.toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata' });
+  return `${datePart} ${timePart}`;
 }
 
 function methodLabel(method) {
