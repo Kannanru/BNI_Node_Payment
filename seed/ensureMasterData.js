@@ -71,19 +71,27 @@ async function ensureUsers() {
   let created = 0;
   let updated = 0;
   for (const { email, name, password } of allowedUsers) {
-    const existing = await User.findOne({ email });
+    // .lean() returns the raw stored document with no Mongoose schema
+    // defaults applied - a role that was never actually written to Mongo
+    // reads as genuinely undefined here. A normal (hydrated) document would
+    // instead show the schema's default value for a missing field, making it
+    // indistinguishable from one that's really stored as 'admin' - which is
+    // exactly what silently defeated the roleMissing check below on the
+    // first attempt at this backfill.
+    const existing = await User.findOne({ email }).lean();
     if (!existing) {
       const passwordHash = await bcrypt.hash(password, 10);
-      await User.create({ email, name, passwordHash });
+      await User.create({ email, name, passwordHash, role: 'admin' });
       created += 1;
       continue;
     }
 
     const passwordMatches = await bcrypt.compare(password, existing.passwordHash);
-    if (!passwordMatches || existing.name !== name) {
-      existing.name = name;
-      existing.passwordHash = await bcrypt.hash(password, 10);
-      await existing.save();
+    const roleMissing = existing.role !== 'admin';
+    if (!passwordMatches || existing.name !== name || roleMissing) {
+      const update = { name, role: 'admin' };
+      if (!passwordMatches) update.passwordHash = await bcrypt.hash(password, 10);
+      await User.updateOne({ _id: existing._id }, { $set: update });
       updated += 1;
     }
   }

@@ -41,4 +41,37 @@ function findMemberById(id) {
   return readMembers().find((m) => m.id === id) || null;
 }
 
-module.exports = { readMembers, findMemberById };
+// Rewrites members.json without [id]. Returns false (no write performed) if
+// the id wasn't present, so callers can 404 instead of silently no-op-ing.
+function removeMemberById(id) {
+  const members = readMembers();
+  const filtered = members.filter((m) => m.id !== id);
+  if (filtered.length === members.length) return false;
+  fs.writeFileSync(membersFilePath(), JSON.stringify(filtered, null, 2) + '\n', 'utf-8');
+  return true;
+}
+
+// Ids are "m<number>" but members.json isn't append-only in practice
+// anymore now that deleteMember can leave gaps (e.g. m71 missing after a
+// delete) - so the next id is derived from the highest numeric suffix
+// currently present, not the array length, to avoid ever reissuing one that
+// used to belong to a deleted member.
+function nextMemberId(members) {
+  let max = 0;
+  for (const m of members) {
+    const match = /^m(\d+)$/.exec(m.id);
+    if (match) max = Math.max(max, Number(match[1]));
+  }
+  return `m${max + 1}`;
+}
+
+// Appends a new member to members.json and returns the created record.
+function addMember({ name, email }) {
+  const members = readMembers();
+  const member = { id: nextMemberId(members), name, email };
+  members.push(member);
+  fs.writeFileSync(membersFilePath(), JSON.stringify(members, null, 2) + '\n', 'utf-8');
+  return member;
+}
+
+module.exports = { readMembers, findMemberById, removeMemberById, addMember };

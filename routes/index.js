@@ -1,5 +1,6 @@
 const express = require('express');
 const authMiddleware = require('../middleware/authMiddleware');
+const requireAdmin = require('../middleware/requireAdmin');
 
 const authRoutes = require('./authRoutes');
 const memberRoutes = require('./memberRoutes');
@@ -7,6 +8,7 @@ const paymentRoutes = require('./paymentRoutes');
 const visitorRoutes = require('./visitorRoutes');
 const settingsRoutes = require('./settingsRoutes');
 const exportRoutes = require('./exportRoutes');
+const adminRoutes = require('./adminRoutes');
 
 const router = express.Router();
 
@@ -18,5 +20,7 @@ router.use('/payments', authMiddleware, paymentRoutes);
 router.use('/visitors', authMiddleware, visitorRoutes);
 router.use('/settings', authMiddleware, settingsRoutes);
 router.use('/export', authMiddleware, exportRoutes);
+// Admin Access management - requires a valid JWT AND role: 'admin' on it.
+router.use('/admin', authMiddleware, requireAdmin, adminRoutes);
 
 module.exports = router;

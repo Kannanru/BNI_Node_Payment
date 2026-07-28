@@ -1,6 +1,10 @@
+const Payment = require('../models/Payment');
+const Visitor = require('../models/Visitor');
 const { getOrCreateSettings } = require('../utils/getSettings');
 const { buildMemberList, buildMemberPendingMonths } = require('../utils/paymentCalculator');
-const { findMemberById } = require('../utils/membersData');
+const { findMemberById, removeMemberById, addMember } = require('../utils/membersData');
+
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 const DEFAULT_PAGE_SIZE = 15;
 
@@ -111,4 +115,49 @@ async function getPendingMonths(req, res, next) {
   }
 }
 
-module.exports = { listMembers, getPendingMonths };
+// Permanently removes a member from the roster along with every payment and
+// visitor (and their payment history) recorded against them - members.json
+// has no foreign-key enforcement, so those Payment/Visitor documents would
+// otherwise be left dangling, still referencing a memberId that no longer
+// resolves to anyone.
+async function deleteMember(req, res, next) {
+  try {
+    const { memberId } = req.params;
+    if (!findMemberById(memberId)) {
+      return res.status(404).json({ message: 'Member not found' });
+    }
+
+    await Payment.deleteMany({ memberId });
+    await Visitor.deleteMany({ memberId });
+    removeMemberById(memberId);
+
+    res.json({ success: true });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// Adds a new member to the roster. Both fields are required by the Add
+// Member sheet on the Home screen - name/email presence and format are
+// re-checked here since the client-side Form validation only guards against
+// an honest client, not a raw API call.
+async function createMember(req, res, next) {
+  try {
+    const name = String(req.body.name || '').trim();
+    const email = String(req.body.email || '').trim().toLowerCase();
+
+    if (!name) {
+      return res.status(400).json({ message: 'Name is required' });
+    }
+    if (!email || !EMAIL_REGEX.test(email)) {
+      return res.status(400).json({ message: 'A valid email is required' });
+    }
+
+    const member = addMember({ name, email });
+    res.status(201).json({ member });
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = { listMembers, getPendingMonths, deleteMember, createMember };
