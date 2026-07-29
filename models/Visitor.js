@@ -39,6 +39,16 @@ const visitorSchema = new mongoose.Schema(
   {
     memberId: { type: String, required: true, index: true },
     name: { type: String, required: true, trim: true },
+    // A Guest is stored as a Visitor with type: 'guest' - same document
+    // shape, same payment/spillover/export/deletion-cascade logic, just its
+    // own fee (Settings.guestFee, not visitorFee - see visitorController.js's
+    // createVisitor) and its own label in the UI. Kept as one collection
+    // rather than a parallel Guest model specifically so all of that
+    // existing machinery (recording payments, a membership-fee payment
+    // spilling over into same-month charges, the Excel export, cascading
+    // delete when a member is removed) applies to guests automatically,
+    // with nothing to keep in sync between two copies of the same logic.
+    type: { type: String, enum: ['visitor', 'guest'], default: 'visitor' },
     // Optional by design - createVisitor no longer requires a valid email/
     // phone to add a visitor, only a name.
     email: { type: String, trim: true, lowercase: true, default: '' },

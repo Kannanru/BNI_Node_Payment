@@ -35,6 +35,21 @@ const settingsSchema = new mongoose.Schema(
       ],
       default: [],
     },
+    // Guests mirror Visitors exactly (see models/Visitor.js's `type` field) -
+    // a separate fee amount because a guest's fee is set independently of a
+    // visitor's, but the same "snapshotted at creation, never retroactive"
+    // semantics apply (see visitorController.js's createVisitor).
+    guestFee: { type: Number, required: true, min: 0 },
+    guestFeeHistory: {
+      type: [
+        {
+          _id: false,
+          amount: { type: Number, required: true, min: 0 },
+          effectiveFrom: { type: Date, required: true },
+        },
+      ],
+      default: [],
+    },
     // The full date (day precision) members' payment tracking starts from -
     // the source of truth defaultStartMonth is derived from.
     memberPaymentStartDate: { type: Date, required: true },

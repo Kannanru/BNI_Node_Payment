@@ -17,6 +17,7 @@ const DEFAULTS = {
   columnDisplayStartMonth: monthKeyOf(new Date().getFullYear(), new Date().getMonth() + 1),
   monthlyFee: 100,
   visitorFee: 50,
+  guestFee: 50,
   memberPaymentStartDate: new Date(Date.UTC(new Date().getFullYear(), 0, 1)),
   visitorPaymentStartDate: new Date(Date.UTC(new Date().getFullYear(), 0, 1)),
 };
@@ -28,6 +29,7 @@ async function getOrCreateSettings() {
     settings = await Settings.create({
       ...DEFAULTS,
       visitorFeeHistory: [{ amount: DEFAULTS.visitorFee, effectiveFrom: new Date() }],
+      guestFeeHistory: [{ amount: DEFAULTS.guestFee, effectiveFrom: new Date() }],
     });
     return settings;
   }
@@ -65,6 +67,18 @@ async function getOrCreateSettings() {
   if (!settings.visitorFeeHistory || settings.visitorFeeHistory.length === 0) {
     settings.visitorFeeHistory = [
       { amount: settings.visitorFee, effectiveFrom: settings.createdAt || new Date() },
+    ];
+    needsSave = true;
+  }
+  // Backfill for a Settings document that predates guestFee/guestFeeHistory -
+  // same reasoning as visitorFee's own backfill above.
+  if (typeof settings.guestFee !== 'number') {
+    settings.guestFee = DEFAULTS.guestFee;
+    needsSave = true;
+  }
+  if (!settings.guestFeeHistory || settings.guestFeeHistory.length === 0) {
+    settings.guestFeeHistory = [
+      { amount: settings.guestFee, effectiveFrom: settings.createdAt || new Date() },
     ];
     needsSave = true;
   }

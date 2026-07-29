@@ -74,4 +74,21 @@ function addMember({ name, email }) {
   return member;
 }
 
-module.exports = { readMembers, findMemberById, removeMemberById, addMember };
+// Renames an existing member in place. Deliberately name-only - email is
+// never accepted here (see memberController.js#updateMember) since it's
+// stored purely for backend use (Admin Access conversion) and is never
+// surfaced to the UI at all; an edit flow that showed/collected it would
+// put it on screen for the first time. id is immutable (it's the foreign
+// key Payment.memberId/Visitor.memberId reference) and isn't accepted
+// either. Returns null (no write performed) if the id doesn't exist, so
+// callers can 404 instead of silently no-op-ing.
+function updateMemberById(id, { name }) {
+  const members = readMembers();
+  const member = members.find((m) => m.id === id);
+  if (!member) return null;
+  member.name = name;
+  fs.writeFileSync(membersFilePath(), JSON.stringify(members, null, 2) + '\n', 'utf-8');
+  return member;
+}
+
+module.exports = { readMembers, findMemberById, removeMemberById, addMember, updateMemberById };

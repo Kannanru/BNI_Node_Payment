@@ -2,7 +2,7 @@ const Payment = require('../models/Payment');
 const Visitor = require('../models/Visitor');
 const { getOrCreateSettings } = require('../utils/getSettings');
 const { buildMemberList, buildMemberPendingMonths } = require('../utils/paymentCalculator');
-const { findMemberById, removeMemberById, addMember } = require('../utils/membersData');
+const { findMemberById, removeMemberById, addMember, updateMemberById } = require('../utils/membersData');
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -160,4 +160,27 @@ async function createMember(req, res, next) {
   }
 }
 
-module.exports = { listMembers, getPendingMonths, deleteMember, createMember };
+// Renames an existing member. Name-only by design - see
+// utils/membersData.js#updateMemberById's doc comment for why email isn't
+// accepted here (it's backend-only and never surfaced to the UI, including
+// this edit flow).
+async function updateMember(req, res, next) {
+  try {
+    const { memberId } = req.params;
+    if (!findMemberById(memberId)) {
+      return res.status(404).json({ message: 'Member not found' });
+    }
+
+    const name = String(req.body.name || '').trim();
+    if (!name) {
+      return res.status(400).json({ message: 'Name is required' });
+    }
+
+    const member = updateMemberById(memberId, { name });
+    res.json({ member });
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = { listMembers, getPendingMonths, deleteMember, createMember, updateMember };

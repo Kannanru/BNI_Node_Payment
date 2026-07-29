@@ -6,32 +6,38 @@ const { validateMethodFields } = require('./paymentController');
 
 async function createVisitor(req, res, next) {
   try {
-    const { memberId, name, email, phone } = req.body;
+    const { memberId, name, email, phone, type } = req.body;
 
     if (!memberId || !findMemberById(memberId)) {
       return res.status(400).json({ message: 'Unknown memberId' });
     }
     if (!name || !name.trim()) {
-      return res.status(400).json({ message: 'Visitor name is required' });
+      return res.status(400).json({ message: 'Name is required' });
+    }
+    if (type !== undefined && type !== 'visitor' && type !== 'guest') {
+      return res.status(400).json({ message: "type must be 'visitor' or 'guest'" });
     }
     // email/phone are optional and unvalidated by design - whatever's
     // provided (including nothing) is stored as-is.
 
+    const resolvedType = type === 'guest' ? 'guest' : 'visitor';
     const settings = await getOrCreateSettings();
+    const fee = resolvedType === 'guest' ? settings.guestFee : settings.visitorFee;
 
     const visitor = await Visitor.create({
       memberId,
       name: name.trim(),
+      type: resolvedType,
       email: (email || '').trim().toLowerCase(),
       phone: (phone || '').trim(),
-      // This visitor's one and only charge, fixed at whatever visitorFee is
-      // right now - a later Settings.visitorFee change (see
+      // This visitor's (or guest's) one and only charge, fixed at whatever
+      // the applicable fee is right now - a later Settings change (see
       // settingsController.js#updateSettings) never alters this; it only
-      // ever applies to a visitor created after that change.
-      charges: [{ amount: settings.visitorFee, effectiveFrom: new Date(), payments: [] }],
+      // ever applies to one created after that change.
+      charges: [{ amount: fee, effectiveFrom: new Date(), payments: [] }],
     });
 
-    res.status(201).json({ visitor: buildVisitorStatus(visitor, settings.visitorFee) });
+    res.status(201).json({ visitor: buildVisitorStatus(visitor, fee) });
   } catch (err) {
     next(err);
   }
@@ -140,6 +146,41 @@ async function editVisitorPayment(req, res, next) {
   }
 }
 
+// Edits a visitor's (or guest's) own details - name/email/phone only.
+// Deliberately never accepts `type` or touches `charges`: which fee applies
+// is fixed forever at whatever it was when they were created (see
+// createVisitor above), and changing type after the fact would leave that
+// already-billed amount pointing at the wrong fee's history for no real
+// benefit - if the wrong button was tapped, deleting and re-adding is the
+// correct fix, not silently reinterpreting an existing charge.
+async function updateVisitor(req, res, next) {
+  try {
+    const { visitorId } = req.params;
+    const { name, email, phone } = req.body;
+
+    const visitor = await Visitor.findById(visitorId);
+    if (!visitor) {
+      return res.status(404).json({ message: 'Visitor not found' });
+    }
+
+    if (name !== undefined) {
+      if (!name || !name.trim()) {
+        return res.status(400).json({ message: 'Name is required' });
+      }
+      visitor.name = name.trim();
+    }
+    if (email !== undefined) visitor.email = (email || '').trim().toLowerCase();
+    if (phone !== undefined) visitor.phone = (phone || '').trim();
+    await visitor.save();
+
+    const settings = await getOrCreateSettings();
+    const fee = visitor.type === 'guest' ? settings.guestFee : settings.visitorFee;
+    res.json({ visitor: buildVisitorStatus(visitor, fee) });
+  } catch (err) {
+    next(err);
+  }
+}
+
 // Permanently removes a visitor and every payment transaction recorded
 // against their fee - there's nothing else referencing a visitor by id
 // (Payment documents are membership-fee only), so this is a clean delete
@@ -160,6 +201,7 @@ async function deleteVisitor(req, res, next) {
 module.exports = {
   createVisitor,
   listVisitorsForMember,
+  updateVisitor,
   recordVisitorPayment,
   editVisitorPayment,
   deleteVisitor,

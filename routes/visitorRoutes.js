@@ -2,6 +2,7 @@ const express = require('express');
 const {
   createVisitor,
   listVisitorsForMember,
+  updateVisitor,
   recordVisitorPayment,
   editVisitorPayment,
   deleteVisitor,
@@ -11,6 +12,7 @@ const router = express.Router();
 
 router.post('/', createVisitor);
 router.get('/', listVisitorsForMember);
+router.patch('/:visitorId', updateVisitor);
 // Every payment route is scoped to one specific charge (due record) - see
 // visitorController.js's recordVisitorPayment/editVisitorPayment - so
 // paying/editing one charge can never touch another on the same visitor.

@@ -133,6 +133,7 @@ function buildVisitorStatus(visitor, visitorFee) {
   return {
     id: visitor._id,
     name: visitor.name,
+    type: visitor.type || 'visitor',
     email: visitor.email,
     phone: visitor.phone,
     createdAt: visitor.createdAt,
