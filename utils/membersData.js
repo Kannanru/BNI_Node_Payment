@@ -66,9 +66,9 @@ function nextMemberId(members) {
 }
 
 // Appends a new member to members.json and returns the created record.
-function addMember({ name, email }) {
+function addMember({ name, phone }) {
   const members = readMembers();
-  const member = { id: nextMemberId(members), name, email };
+  const member = { id: nextMemberId(members), name, phone };
   members.push(member);
   fs.writeFileSync(membersFilePath(), JSON.stringify(members, null, 2) + '\n', 'utf-8');
   return member;

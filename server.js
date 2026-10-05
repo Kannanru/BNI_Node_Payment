@@ -5,6 +5,8 @@ const Payment = require('./models/Payment');
 const { ensureMasterData } = require('./seed/ensureMasterData');
 const { readMembers } = require('./utils/membersData');
 const { readAllowedUsers } = require('./utils/allowedUsersData');
+const { normalizePhone, maskPhone } = require('./utils/phone');
+const { isSmsConfigured } = require('./utils/sms');
 
 // Prints exactly what was loaded from allowedUsers.json and the member
 // roster file on every boot, by name - not just a count - so a manual edit
@@ -13,7 +15,13 @@ const { readAllowedUsers } = require('./utils/allowedUsersData');
 // nothing left to take on faith.
 function logLoadedMasterData() {
   const users = readAllowedUsers();
-  console.log(`[startup] allowedUsers.json: ${users.length} account(s) - ${users.map((u) => u.email).join(', ')}`);
+  const summary = users.map((u) => `${u.name} (${normalizePhone(u.phone) ? maskPhone(normalizePhone(u.phone)) : 'NO VALID PHONE'})`);
+  console.log(`[startup] allowedUsers.json: ${users.length} account(s) - ${summary.join(', ')}`);
+  console.log(
+    isSmsConfigured()
+      ? '[startup] Login OTP: sending real SMS via Saptel.'
+      : '[startup] Login OTP: DEV MODE - Saptel not configured, OTPs are printed in this terminal.'
+  );
 
   const members = readMembers();
   const membersSource = env.membersFile || '(default) data/members.json';

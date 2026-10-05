@@ -1,36 +1,16 @@
-// Seeds the fixed set of employee accounts allowed to log in (see
-// config/allowedUsers.json). The app has no signup UI, so this is the only
-// way accounts get created. Each account's password is set explicitly in
-// allowedUsers.json and stored bcrypt-hashed here. Any User document whose
-// email is not in the allowlist is removed.
+// Syncs the login accounts with config/allowedUsers.json on demand - the
+// same reconciliation `npm start` already runs on every boot (see
+// ensureMasterData.js's ensureUsers). The app has no signup UI, so the
+// allowlist is the only way accounts get created. Accounts log in with a
+// mobile number + SMS OTP; there are no passwords.
 // Usage: node seed/seedUsers.js
-const bcrypt = require('bcryptjs');
 const connectDB = require('../config/db');
-const User = require('../models/User');
-const { readAllowedUsers } = require('../utils/allowedUsersData');
+const { ensureUsers } = require('./ensureMasterData');
 
 async function main() {
   await connectDB();
-
-  const ALLOWED_USERS = readAllowedUsers();
-  const allowedEmails = ALLOWED_USERS.map((u) => u.email);
-  const { deletedCount } = await User.deleteMany({ email: { $nin: allowedEmails } });
-  if (deletedCount > 0) {
-    console.log(`Removed ${deletedCount} account(s) not on the allowlist.`);
-  }
-
-  for (const { email, name, password } of ALLOWED_USERS) {
-    const passwordHash = await bcrypt.hash(password, 10);
-
-    await User.findOneAndUpdate(
-      { email },
-      { email, name, passwordHash },
-      { new: true, upsert: true, setDefaultsOnInsert: true }
-    );
-    console.log(`Seeded user: ${email} (password: ${password})`);
-  }
-
-  console.log('Done seeding employee accounts.');
+  await ensureUsers();
+  console.log('Done syncing login accounts.');
   process.exit(0);
 }
 

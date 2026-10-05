@@ -16,7 +16,7 @@ function authMiddleware(req, res, next) {
     // available". role in particular is informational only here (e.g. for a
     // client-side UI hint) - requireAdmin never trusts this claim, it always
     // re-checks the account's current role in the database instead.
-    req.user = { id: decoded.sub, email: decoded.email, name: decoded.name, role: decoded.role };
+    req.user = { id: decoded.sub, phone: decoded.phone, email: decoded.email, name: decoded.name, role: decoded.role };
     next();
   } catch (err) {
     return res.status(401).json({ message: 'Invalid or expired token' });

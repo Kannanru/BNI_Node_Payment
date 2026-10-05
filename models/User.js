@@ -3,8 +3,13 @@ const mongoose = require('mongoose');
 const userSchema = new mongoose.Schema(
   {
     name: { type: String, required: true, trim: true },
-    email: { type: String, required: true, unique: true, lowercase: true, trim: true },
-    passwordHash: { type: String, required: true },
+    // Login identity: a bare 10-digit mobile number (see utils/phone.js).
+    // Accounts sign in with an SMS OTP sent to this number - there are no
+    // passwords.
+    phone: { type: String, required: true, unique: true, trim: true },
+    // Optional, informational only (stamped onto payments/visitors as
+    // recordedByEmail when present). Never used to log in.
+    email: { type: String, lowercase: true, trim: true },
     // Every account created through any current pathway (config/allowedUsers.json
     // seeding, or converting a member via the Admin Access screen) grants full
     // app access, so 'admin' is the only role that exists today - this field

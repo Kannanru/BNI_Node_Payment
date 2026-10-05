@@ -18,7 +18,6 @@
 // instead of erroring loudly.
 const path = require('path');
 const fs = require('fs');
-const bcrypt = require('bcryptjs');
 const mongoose = require('mongoose');
 const ExcelJS = require('exceljs');
 const User = require('../models/User');
@@ -26,6 +25,7 @@ const Payment = require('../models/Payment');
 const Visitor = require('../models/Visitor');
 const { readAllowedUsers } = require('../utils/allowedUsersData');
 const { readMembers } = require('../utils/membersData');
+const { normalizePhone } = require('../utils/phone');
 const { getOrCreateSettings } = require('../utils/getSettings');
 
 const EXCEL_PATH = path.join(__dirname, '..', 'data', 'WEEK AFTER WEEK PAYMENTS.xlsx');
@@ -58,44 +58,59 @@ function randomPaidAt(year, month, day) {
 
 // Always kept present and in sync with config/allowedUsers.json - deletes
 // any User not on the allowlist, creates whatever's missing, and updates
-// any existing account whose name/password in the JSON no longer matches
+// any existing account whose name/email in the JSON no longer matches
 // what's stored (so editing an entry, not just adding one, takes effect on
-// the next restart with no code change). Untouched by the payment-data
-// seeding below (separate collection, separate logic).
+// the next restart with no code change). Accounts are keyed by mobile
+// number; an entry with a missing or invalid phone is skipped with a
+// warning (it can't log in until a valid number is filled in). Untouched by
+// the payment-data seeding below (separate collection, separate logic).
 async function ensureUsers() {
   const allowedUsers = readAllowedUsers();
-  const allowedEmails = allowedUsers.map((u) => u.email);
-  const { deletedCount } = await User.deleteMany({ email: { $nin: allowedEmails } });
+
+  const valid = [];
+  for (const entry of allowedUsers) {
+    const phone = normalizePhone(entry.phone);
+    if (!phone) {
+      console.warn(`[seed] WARNING: "${entry.name}" in allowedUsers.json has no valid 10-digit phone - skipped, cannot log in.`);
+      continue;
+    }
+    valid.push({ phone, name: entry.name, email: entry.email ? String(entry.email).toLowerCase().trim() : undefined });
+  }
+
+  // Pre-OTP accounts were keyed by a unique email and have no phone at all.
+  // They must be gone before syncIndexes swaps the old unique email index
+  // for the unique phone one - otherwise building the phone index fails on
+  // several documents sharing a missing phone, and the old email index
+  // rejects new accounts that have no email.
+  await User.deleteMany({ phone: { $exists: false } });
+  await User.syncIndexes();
+
+  const { deletedCount } = await User.deleteMany({ phone: { $nin: valid.map((u) => u.phone) } });
   if (deletedCount > 0) console.log(`[seed] Removed ${deletedCount} account(s) not on the allowlist.`);
 
   let created = 0;
   let updated = 0;
-  for (const { email, name, password } of allowedUsers) {
+  for (const { phone, name, email } of valid) {
     // .lean() returns the raw stored document with no Mongoose schema
     // defaults applied - a role that was never actually written to Mongo
-    // reads as genuinely undefined here. A normal (hydrated) document would
-    // instead show the schema's default value for a missing field, making it
-    // indistinguishable from one that's really stored as 'admin' - which is
-    // exactly what silently defeated the roleMissing check below on the
-    // first attempt at this backfill.
-    const existing = await User.findOne({ email }).lean();
+    // reads as genuinely undefined here, so the roleMissing check works.
+    const existing = await User.findOne({ phone }).lean();
     if (!existing) {
-      const passwordHash = await bcrypt.hash(password, 10);
-      await User.create({ email, name, passwordHash, role: 'admin' });
+      await User.create({ phone, name, email, role: 'admin' });
       created += 1;
       continue;
     }
 
-    const passwordMatches = await bcrypt.compare(password, existing.passwordHash);
     const roleMissing = existing.role !== 'admin';
-    if (!passwordMatches || existing.name !== name || roleMissing) {
-      const update = { name, role: 'admin' };
-      if (!passwordMatches) update.passwordHash = await bcrypt.hash(password, 10);
-      await User.updateOne({ _id: existing._id }, { $set: update });
+    if (existing.name !== name || existing.email !== email || roleMissing) {
+      const update = { $set: { name, role: 'admin' } };
+      if (email) update.$set.email = email;
+      else update.$unset = { email: 1 };
+      await User.updateOne({ _id: existing._id }, update);
       updated += 1;
     }
   }
-  console.log(`[seed] Users: ${allowedUsers.length} allowed, ${created} newly created, ${updated} updated.`);
+  console.log(`[seed] Users: ${valid.length} allowed, ${created} newly created, ${updated} updated.`);
 }
 
 // Parses the July sheet into the same shape as seedJulyOnly.js, but never

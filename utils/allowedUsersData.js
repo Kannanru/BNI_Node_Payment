@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { normalizePhone } = require('./phone');
 
 const ALLOWED_USERS_FILE = path.join(__dirname, '..', 'config', 'allowedUsers.json');
 
@@ -7,8 +8,10 @@ const ALLOWED_USERS_FILE = path.join(__dirname, '..', 'config', 'allowedUsers.js
 // so adding, removing, or editing an entry never needs a code change and is
 // never held stale by Node's require() cache - only a server restart is
 // needed for a brand new account to actually become able to log in, since
-// that's when ensureMasterData.js's ensureUsers() creates its bcrypt-hashed
-// User document.
+// that's when ensureMasterData.js's ensureUsers() creates its User document.
+//
+// Each entry is { "phone": "9876543210", "name": "...", "email": "..." } -
+// phone is the login identity (SMS OTP), email is optional and informational.
 function readAllowedUsers() {
   const raw = fs.readFileSync(ALLOWED_USERS_FILE, 'utf-8');
   let users;
@@ -32,55 +35,34 @@ function readAllowedUsers() {
   return users;
 }
 
-// Rewrites the matching entry's plaintext password. This file is the
-// source of truth ensureMasterData.js's ensureUsers() reconciles Mongo
-// against on every server restart - if a password is changed in Mongo
-// (User.passwordHash) without also updating it here, the very next restart
-// would detect the "mismatch" and silently overwrite the new hash back to
-// whatever this file still says. Returns false if the email isn't found, so
-// callers can surface an error instead of silently no-op-ing.
-function updateAllowedUserPassword(email, newPassword) {
-  const users = readAllowedUsers();
-  const user = users.find((u) => u.email === email);
-  if (!user) return false;
-  user.password = newPassword;
-  fs.writeFileSync(ALLOWED_USERS_FILE, JSON.stringify(users, null, 2) + '\n', 'utf-8');
-  return true;
-}
-
 // Appends every entry not already present (e.g. every member just converted
 // to Admin in one Admin Access batch) in a single read-modify-write. This
 // file - not just the Mongo User document - is what
 // ensureMasterData.js's ensureUsers() reconciles against on every restart,
 // so skipping this write would mean the very next restart deletes those User
-// documents again (their emails wouldn't be on the allowlist). Takes the
-// whole batch at once rather than being called once per entry specifically
-// so a multi-select conversion does one file read and one write no matter
-// how many members were selected, instead of one of each per member.
+// documents again (their numbers wouldn't be on the allowlist).
 function addAllowedUsers(entries) {
   const users = readAllowedUsers();
-  const existingEmails = new Set(users.map((u) => u.email));
-  const additions = entries.filter((e) => !existingEmails.has(e.email));
+  const existingPhones = new Set(users.map((u) => normalizePhone(u.phone)).filter(Boolean));
+  const additions = entries.filter((e) => !existingPhones.has(e.phone));
   if (!additions.length) return 0;
   users.push(...additions);
   fs.writeFileSync(ALLOWED_USERS_FILE, JSON.stringify(users, null, 2) + '\n', 'utf-8');
   return additions.length;
 }
 
-// Removes every entry whose email is in `emails` (e.g. every member just
+// Removes every entry whose phone is in `phones` (e.g. every member just
 // demoted back to a plain Member in one Admin Access save) in a single
 // read-modify-write, mirroring addAllowedUsers. Removing this - not just the
-// Mongo User document - is what actually blocks login: authController.js's
-// login() checks this file as the gatekeeper before it ever looks at Mongo,
-// so leaving a demoted member's entry here would let them keep logging in
-// (with their old Admin password) even after their Mongo account is gone.
-function removeAllowedUsers(emails) {
+// Mongo User document - is what actually blocks login: authController.js
+// checks this file as the gatekeeper before it ever sends an OTP.
+function removeAllowedUsers(phones) {
   const users = readAllowedUsers();
-  const emailSet = new Set(emails);
-  const remaining = users.filter((u) => !emailSet.has(u.email));
+  const phoneSet = new Set(phones);
+  const remaining = users.filter((u) => !phoneSet.has(normalizePhone(u.phone)));
   const removedCount = users.length - remaining.length;
   if (removedCount > 0) fs.writeFileSync(ALLOWED_USERS_FILE, JSON.stringify(remaining, null, 2) + '\n', 'utf-8');
   return removedCount;
 }
 
-module.exports = { readAllowedUsers, updateAllowedUserPassword, addAllowedUsers, removeAllowedUsers };
+module.exports = { readAllowedUsers, addAllowedUsers, removeAllowedUsers };

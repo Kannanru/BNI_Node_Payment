@@ -1,27 +1,57 @@
 [
   {
-    "email": "kannan@askantech.com",
+    "phone": "7871997663",
     "name": "Kannan",
-    "password": "kannan@askantech"
+    "email": "kannan@askantech.com"
   },
   {
-    "email": "grspondy@gmail.com",
-    "name": "GRS Pondy",
-    "password": "grspondy@bni123"
-  },
-  {
-    "email": "neha01jk@gmail.com",
-    "name": "Neha",
-    "password": "neha@bni123"
-  },
-  {
-    "email": "ap@dlcakers.in",
+    "phone": "",
     "name": "Cake",
-    "password": "ap@bni123"
+    "email": "ap@dlcakers.in"
   },
   {
-    "email": "ashokgrindebni@gmail.com",
+    "phone": "7667808833",
     "name": "Ashok Grinde",
-    "password": "krishnA*99"
+    "email": "ashokgrindebni@gmail.com"
+  },
+  {
+    "phone": "9944454342",
+    "name": "Jackson ",
+    "email": ""
+  },
+{
+    "phone": "9790011045",
+    "name": "Arvind Prebagar",
+    "email": ""
+  },
+  {
+    "phone": "96772 77944",
+    "name": "Vijay Simhan",
+    "email": ""
+  },
+  {
+    "phone": "9443280269",
+    "name": "Elumalai",
+    "email": ""
+  },
+  {
+    "phone": "9655555518",
+    "name": "Murali ram",
+    "email": ""
+  },
+  {
+    "phone": "9965532560",
+    "name": "Meenakshi",
+    "email": ""
+  },
+  {
+    "phone": "",
+    "name": "Sridhar",
+    "email": ""
+  },
+  {
+    "phone": "9597762397",
+    "name": "Mano",
+    "email": ""
   }
 ]

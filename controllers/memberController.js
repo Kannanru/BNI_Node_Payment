@@ -3,8 +3,7 @@ const Visitor = require('../models/Visitor');
 const { getOrCreateSettings } = require('../utils/getSettings');
 const { buildMemberList, buildMemberPendingMonths } = require('../utils/paymentCalculator');
 const { findMemberById, removeMemberById, addMember, updateMemberById } = require('../utils/membersData');
-
-const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const { normalizePhone } = require('../utils/phone');
 
 const DEFAULT_PAGE_SIZE = 15;
 
@@ -138,22 +137,23 @@ async function deleteMember(req, res, next) {
 }
 
 // Adds a new member to the roster. Both fields are required by the Add
-// Member sheet on the Home screen - name/email presence and format are
+// Member sheet on the Home screen - name/phone presence and format are
 // re-checked here since the client-side Form validation only guards against
-// an honest client, not a raw API call.
+// an honest client, not a raw API call. The phone is what Admin Access uses
+// as the member's OTP login number if they're ever made an Admin.
 async function createMember(req, res, next) {
   try {
     const name = String(req.body.name || '').trim();
-    const email = String(req.body.email || '').trim().toLowerCase();
+    const phone = normalizePhone(req.body.phone);
 
     if (!name) {
       return res.status(400).json({ message: 'Name is required' });
     }
-    if (!email || !EMAIL_REGEX.test(email)) {
-      return res.status(400).json({ message: 'A valid email is required' });
+    if (!phone) {
+      return res.status(400).json({ message: 'A valid 10-digit mobile number is required' });
     }
 
-    const member = addMember({ name, email });
+    const member = addMember({ name, phone });
     res.status(201).json({ member });
   } catch (err) {
     next(err);
