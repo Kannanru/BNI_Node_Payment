@@ -1,6 +1,9 @@
 const Settings = require('../models/Settings');
 const { getOrCreateSettings } = require('../utils/getSettings');
 const { monthKeyOf } = require('../utils/monthRange');
+const { actorFrom } = require('../utils/audit');
+const { LEGACY_FIELD, currentMonthKey, loadFeeResolver, currentFees } = require('../utils/feeSchedule');
+const { applyFeeChange, buildFeeOverview } = require('./feeController');
 
 const DATE_ONLY_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -12,24 +15,27 @@ function sortedHistory(history) {
     .map((entry) => ({ amount: entry.amount, effectiveFrom: entry.effectiveFrom.toISOString().slice(0, 10) }));
 }
 
-function serialize(settings) {
-  // Most-recent-first, so the Settings screen can show "currently ₹X,
-  // effective from <date>" as the first entry and the rest as history.
+// monthlyFee/visitorFee/guestFee are THIS month's fees from the fee schedule
+// (each month's own fee is resolved separately - see utils/feeSchedule.js);
+// `fees` is the full month-wise schedule for the Settings screen.
+async function serialize(settings) {
+  const fees = await buildFeeOverview(settings);
   return {
     defaultStartMonth: settings.defaultStartMonth,
-    monthlyFee: settings.monthlyFee,
-    visitorFee: settings.visitorFee,
+    monthlyFee: fees.current.member,
+    visitorFee: fees.current.visitor,
     visitorFeeHistory: sortedHistory(settings.visitorFeeHistory),
-    guestFee: settings.guestFee,
+    guestFee: fees.current.guest,
     guestFeeHistory: sortedHistory(settings.guestFeeHistory),
     memberPaymentStartDate: settings.memberPaymentStartDate.toISOString().slice(0, 10),
+    fees,
   };
 }
 
 async function getSettings(req, res, next) {
   try {
     const settings = await getOrCreateSettings();
-    res.json(serialize(settings));
+    res.json(await serialize(settings));
   } catch (err) {
     next(err);
   }
@@ -42,14 +48,14 @@ async function updateSettings(req, res, next) {
     if (!DATE_ONLY_REGEX.test(memberPaymentStartDate || '')) {
       return res.status(400).json({ message: 'memberPaymentStartDate must be in YYYY-MM-DD format' });
     }
-    if (typeof monthlyFee !== 'number' || monthlyFee < 0) {
-      return res.status(400).json({ message: 'monthlyFee must be a non-negative number' });
-    }
-    if (typeof visitorFee !== 'number' || visitorFee < 0) {
-      return res.status(400).json({ message: 'visitorFee must be a non-negative number' });
-    }
-    if (typeof guestFee !== 'number' || guestFee < 0) {
-      return res.status(400).json({ message: 'guestFee must be a non-negative number' });
+    // Fees are optional here now - they're managed month-wise through
+    // /api/fees. Older app versions still send all three; each is checked
+    // only if sent.
+    const sentFees = { member: monthlyFee, visitor: visitorFee, guest: guestFee };
+    for (const [role, value] of Object.entries(sentFees)) {
+      if (value !== undefined && (typeof value !== 'number' || value < 0)) {
+        return res.status(400).json({ message: `${LEGACY_FIELD[role]} must be a non-negative number` });
+      }
     }
 
     const memberStart = new Date(memberPaymentStartDate);
@@ -57,51 +63,38 @@ async function updateSettings(req, res, next) {
       return res.status(400).json({ message: 'Invalid start date' });
     }
 
-    const existing = await getOrCreateSettings();
+    await Settings.updateOne(
+      { key: 'app_settings' },
+      {
+        $set: {
+          // defaultStartMonth is derived from memberPaymentStartDate here,
+          // then read as-is by every existing month-range calculation - see
+          // models/Settings.js.
+          defaultStartMonth: monthKeyOf(memberStart.getFullYear(), memberStart.getMonth() + 1),
+          memberPaymentStartDate: memberStart,
+          // visitorPaymentStartDate is no longer editable from the Settings
+          // screen - left untouched, so it keeps whatever value it has.
+        },
+      }
+    );
 
-    // Mongo requires an update document to be either all plain fields or
-    // all operators, never mixed at the top level - $set holds the former
-    // so $push can be added alongside it below when needed.
-    const update = {
-      $set: {
-        // defaultStartMonth is derived from memberPaymentStartDate here,
-        // then read as-is by every existing month-range calculation - see
-        // models/Settings.js.
-        defaultStartMonth: monthKeyOf(memberStart.getFullYear(), memberStart.getMonth() + 1),
-        monthlyFee,
-        visitorFee,
-        guestFee,
-        memberPaymentStartDate: memberStart,
-        // visitorPaymentStartDate is no longer editable from the Settings
-        // screen (Visitor config has no Starting Month field) - left
-        // untouched here, so it keeps whatever value it already has.
-      },
-    };
-
-    // Only a genuine change gets its own history entry/effective date - not
-    // every save (e.g. re-saving monthlyFee alone shouldn't add a
-    // no-op "changed to the same amount" row). This history is a pure audit
-    // trail of what visitorFee/guestFee has been set to and when - it does
-    // NOT retroactively touch any existing visitor/guest's charge (see
-    // visitorController.js's createVisitor: each one's charge amount is
-    // fixed to whatever the fee was at the moment THEY were created, and
-    // never changes after that no matter how many times this value is
-    // updated later). Only one created after this point picks up the new
-    // amount. $push can push to both array fields in the same update.
-    const push = {};
-    if (visitorFee !== existing.visitorFee) {
-      push.visitorFeeHistory = { amount: visitorFee, effectiveFrom: new Date() };
-    }
-    if (guestFee !== existing.guestFee) {
-      push.guestFeeHistory = { amount: guestFee, effectiveFrom: new Date() };
-    }
-    if (Object.keys(push).length > 0) {
-      update.$push = push;
+    // A fee sent by an older app that differs from this month's fee becomes
+    // a fee change from the CURRENT month onward - never applied to any
+    // earlier month.
+    const current = currentFees(await loadFeeResolver(await getOrCreateSettings()));
+    for (const [role, value] of Object.entries(sentFees)) {
+      if (value !== undefined && value !== current[role]) {
+        const result = await applyFeeChange({
+          role,
+          effectiveMonth: currentMonthKey(),
+          amount: value,
+          actor: actorFrom(req),
+        });
+        if (result.error) return res.status(result.status).json({ message: result.error });
+      }
     }
 
-    const settings = await Settings.findOneAndUpdate({ key: 'app_settings' }, update, { new: true });
-
-    res.json(serialize(settings));
+    res.json(await serialize(await getOrCreateSettings()));
   } catch (err) {
     next(err);
   }

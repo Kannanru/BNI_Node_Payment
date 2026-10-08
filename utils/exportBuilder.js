@@ -3,6 +3,7 @@ const Visitor = require('../models/Visitor');
 const { readMembers } = require('./membersData');
 const { buildMonthRangeBetween, monthKeyOf, parseMonthKey, shortMonthYearLabel } = require('./monthRange');
 const { visitorMonthKey, isVisitorInScope, buildVisitorStatus, memberJoinMonthKey } = require('./paymentCalculator');
+const { loadFeeResolver } = require('./feeSchedule');
 
 // Both explicitly pin timeZone to Asia/Kolkata rather than relying on the
 // server process's local timezone (toLocaleDateString/toLocaleTimeString
@@ -128,11 +129,12 @@ async function buildMemberExportSheet({ fromMonth, toMonth, settings }) {
   const members = await readMembers();
   const memberIds = members.map((m) => m.id);
 
-  const [payments, visitors] = await Promise.all([
+  const [payments, visitors, resolveFee] = await Promise.all([
     Payment.find({ memberId: { $in: memberIds }, month: { $in: monthKeys } })
       .sort({ paidAt: 1 })
       .lean(),
     Visitor.find({ memberId: { $in: memberIds } }).lean(),
+    loadFeeResolver(settings),
   ]);
 
   const paymentsByMemberMonth = new Map(); // memberId -> month -> [payments]
@@ -212,8 +214,10 @@ async function buildMemberExportSheet({ fromMonth, toMonth, settings }) {
         monthGroupCells.push('-', 0, 0, '', '', '', '');
         continue;
       }
-      const { cells, paid, remaining } = monthCells(transactions, settings.monthlyFee);
-      totalExpected += settings.monthlyFee;
+      // Each month against the fee that applied to that month.
+      const monthFee = resolveFee('member', key);
+      const { cells, paid, remaining } = monthCells(transactions, monthFee);
+      totalExpected += monthFee;
       totalPaid += paid;
       totalPending += remaining;
       monthGroupCells.push(...cells);

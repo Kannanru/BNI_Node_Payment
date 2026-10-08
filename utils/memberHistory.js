@@ -4,6 +4,7 @@ const AuditLog = require('../models/AuditLog');
 const { findMemberById } = require('./membersData');
 const { buildMonthRange, parseMonthKey, monthKeyOf, MONTH_LABELS } = require('./monthRange');
 const { isVisitorInScope } = require('./paymentCalculator');
+const { loadFeeResolver, currentFees, currentMonthKey } = require('./feeSchedule');
 
 const METHOD_LABELS = { upi: 'UPI', card: 'Card', cash: 'Cash' };
 const inr = new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 });
@@ -65,13 +66,25 @@ function describeLog(log) {
       return { title: 'Member deleted', description: 'Removed from the app. All records are kept.', icon: 'delete' };
     case 'payment.create':
       return {
-        title: `Payment received · ${monthLabel(d.month)}`,
+        title: `${d.isAdvance ? 'Advance payment' : 'Payment received'} · ${monthLabel(d.month)}`,
         description: `${money(d.amount)} via ${methodLabel(d.method, d.cardLastFour)}`
+          + (d.receiptTotal && Array.isArray(d.receiptAllocations) && d.receiptAllocations.length > 1
+            ? ` · part of one ${money(d.receiptTotal)} payment (${d.receiptAllocations
+              .map((a) => `${monthLabel(a.month)} ${money(a.amount)}`)
+              .join(' · ')})`
+            : '')
           + (d.transactionRef ? ` · Ref ${d.transactionRef}` : '')
           + (d.remarks ? ` · ${d.remarks}` : ''),
         icon: 'payment',
         amount: d.amount,
         method: d.method,
+        month: d.month,
+      };
+    case 'payment.delete':
+      return {
+        title: `Payment removed · ${monthLabel(d.month)}`,
+        description: `${money(d.amount)} via ${methodLabel(d.method, d.cardLastFour)}${d.reason ? ` · ${d.reason}` : ''}`,
+        icon: 'delete',
         month: d.month,
       };
     case 'payment.update':
@@ -123,7 +136,8 @@ function event({ id, at, action, actorName, legacy = false, changes = [], ...res
 // screen's month columns start from (Settings.columnDisplayStartMonth), so
 // the history never lists months the app itself doesn't track. A member
 // created in the app (not imported) only owes from the month they joined.
-function buildMonthStatuses(member, payments, settings) {
+// Each month is measured against the fee that applied to THAT month.
+function buildMonthStatuses(member, payments, settings, resolveFee) {
   let startKey = settings.columnDisplayStartMonth || settings.defaultStartMonth;
   if (!member.importedFromFile && member.createdAt) {
     const created = new Date(member.createdAt);
@@ -136,11 +150,12 @@ function buildMonthStatuses(member, payments, settings) {
 
   return buildMonthRange(startKey).map(({ key }) => {
     const paid = paidByMonth.get(key) || 0;
-    const remaining = Math.max(settings.monthlyFee - paid, 0);
+    const fee = resolveFee('member', key);
+    const remaining = Math.max(fee - paid, 0);
     return {
       monthKey: key,
       label: monthLabel(key),
-      totalDue: settings.monthlyFee,
+      totalDue: fee,
       paid,
       remaining,
       status: remaining <= 0 ? 'paid' : paid > 0 ? 'partial' : 'pending',
@@ -156,10 +171,11 @@ async function buildMemberTimeline(memberId, settings) {
   const member = await findMemberById(memberId, { includeDeleted: true });
   if (!member) return null;
 
-  const [payments, visitors, logs] = await Promise.all([
+  const [payments, visitors, logs, resolveFee] = await Promise.all([
     Payment.find({ memberId }).sort({ paidAt: -1 }).lean(),
     Visitor.find({ memberId }).setOptions({ withDeleted: true }).sort({ createdAt: -1 }).lean(),
     AuditLog.find({ memberId }).sort({ at: -1 }).lean(),
+    loadFeeResolver(settings),
   ]);
 
   const logged = new Set(logs.map((l) => `${l.action}|${l.entityId}`));
@@ -171,6 +187,9 @@ async function buildMemberTimeline(memberId, settings) {
       action: log.action,
       actorName: log.actor?.name,
       changes: formatChanges(log.changes),
+      // For payments: when the customer paid vs when it was entered in the app.
+      paidAt: log.details?.paidAt || null,
+      enteredAt: log.details?.enteredAt || null,
       ...described,
     });
   });
@@ -271,6 +290,9 @@ async function buildMemberTimeline(memberId, settings) {
       method: p.method,
       methodLabel: methodLabel(p.method, p.cardLastFour),
       paidAt: p.paidAt,
+      enteredAt: p.createdAt || null,
+      receiptId: p.receiptId || null,
+      isAdvance: p.month > currentMonthKey(),
       recordedByName: p.recordedByName || null,
       transactionRef: p.transactionRef || null,
       remarks: p.remarks || null,
@@ -291,6 +313,7 @@ async function buildMemberTimeline(memberId, settings) {
           method: vp.method,
           methodLabel: methodLabel(vp.method, vp.cardLastFour),
           paidAt: vp.paidAt,
+          enteredAt: vp.createdAt || null,
           recordedByName: vp.recordedByName || null,
           transactionRef: vp.transactionRef || null,
           remarks: vp.remarks || null,
@@ -303,7 +326,7 @@ async function buildMemberTimeline(memberId, settings) {
   ].sort((a, b) => new Date(b.paidAt) - new Date(a.paidAt));
 
   // ---- Pending ----
-  const months = buildMonthStatuses(member, payments, settings);
+  const months = buildMonthStatuses(member, payments, settings, resolveFee);
   const pendingMonths = months.filter((m) => m.remaining > 0);
   const pendingVisitors = visitors
     .filter((v) => !v.isDeleted && isVisitorInScope(v, settings.visitorPaymentStartDate))
@@ -329,7 +352,7 @@ async function buildMemberTimeline(memberId, settings) {
       deletedByName: member.deletedBy?.name || null,
     },
     summary: {
-      monthlyFee: settings.monthlyFee,
+      monthlyFee: currentFees(resolveFee).member, // this month's fee
       trackedFrom: months.length ? months[0].monthKey : null,
       monthsPaid: months.filter((m) => m.status === 'paid').length,
       monthsPending: pendingMonths.length,

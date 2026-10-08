@@ -1,6 +1,7 @@
 const Payment = require('../models/Payment');
 const Visitor = require('../models/Visitor');
 const { readMembers, findMemberById } = require('./membersData');
+const { loadFeeResolver } = require('./feeSchedule');
 const { buildMonthRange, buildCurrentMonthAndHistory, monthKeyOf, parseMonthKey } = require('./monthRange');
 
 async function loadMemberData(monthKeys) {
@@ -62,11 +63,16 @@ function mapPaymentEntry(payment) {
 // [joinKey] ("YYYY-MM", optional) is the month the member was added: a month
 // before it, with nothing paid, is 'not_applicable' - nothing was owed yet,
 // so it's neither shown as Due nor counted in any pending total.
-function buildMonthsResult(monthList, memberPaymentsByMonth, totalDue, joinKey = null) {
+//
+// [feeForMonth] is either a number (same fee every month) or a function
+// (monthKey) => fee, so each month is measured against the fee that applied
+// to THAT month (see utils/feeSchedule.js) rather than today's fee.
+function buildMonthsResult(monthList, memberPaymentsByMonth, feeForMonth, joinKey = null) {
   const monthsResult = {};
   let pendingAmount = 0;
 
   for (const { key, label } of monthList) {
+    const totalDue = typeof feeForMonth === 'function' ? feeForMonth(key) : feeForMonth;
     const transactions = memberPaymentsByMonth.get(key) || [];
     if (joinKey && key < joinKey && transactions.length === 0) {
       monthsResult[key] = {
@@ -240,17 +246,16 @@ function trackedMonths(settings, now = new Date()) {
 // Re-derived from the system clock on every request.
 async function buildMemberList(settings) {
   const displayMonths = trackedMonths(settings);
-  const { members, paymentsByMember, visitorsByMember } = await loadMemberData(displayMonths.map((m) => m.key));
+  const [{ members, paymentsByMember, visitorsByMember }, resolveFee] = await Promise.all([
+    loadMemberData(displayMonths.map((m) => m.key)),
+    loadFeeResolver(settings),
+  ]);
+  const memberFee = (monthKey) => resolveFee('member', monthKey);
 
   return members.map((member) => {
     const memberPayments = paymentsByMember.get(member.id) || new Map();
     const joinKey = memberJoinMonthKey(member);
-    const { monthsResult, pendingAmount } = buildMonthsResult(
-      displayMonths,
-      memberPayments,
-      settings.monthlyFee,
-      joinKey
-    );
+    const { monthsResult, pendingAmount } = buildMonthsResult(displayMonths, memberPayments, memberFee, joinKey);
 
     const memberVisitors = visitorsByMember.get(member.id) || [];
     const visitorStatuses = mapVisitors(memberVisitors, settings.visitorFee, settings.visitorPaymentStartDate);
@@ -273,16 +278,18 @@ async function buildMemberList(settings) {
 // current-year display window, since exports need to cover past months too.
 async function buildMemberHistory(settings) {
   const historicalMonths = buildMonthRange(settings.defaultStartMonth);
-  const { members, paymentsByMember, visitorsByMember } = await loadMemberData(
-    historicalMonths.map((m) => m.key)
-  );
+  const [{ members, paymentsByMember, visitorsByMember }, resolveFee] = await Promise.all([
+    loadMemberData(historicalMonths.map((m) => m.key)),
+    loadFeeResolver(settings),
+  ]);
+  const memberFee = (monthKey) => resolveFee('member', monthKey);
 
   return members.map((member) => {
     const memberPayments = paymentsByMember.get(member.id) || new Map();
     const { monthsResult, pendingAmount } = buildMonthsResult(
       historicalMonths,
       memberPayments,
-      settings.monthlyFee,
+      memberFee,
       memberJoinMonthKey(member)
     );
 
@@ -315,9 +322,10 @@ async function buildMemberPendingMonths(memberId, settings) {
   const monthKeys = months.map((m) => m.key);
   const currentKey = monthKeyOf(now.getFullYear(), now.getMonth() + 1);
 
-  const [payments, member] = await Promise.all([
+  const [payments, member, resolveFee] = await Promise.all([
     Payment.find({ memberId, month: { $in: monthKeys } }).sort({ paidAt: 1 }).lean(),
     findMemberById(memberId),
+    loadFeeResolver(settings),
   ]);
   const memberPayments = new Map();
   for (const payment of payments) {
@@ -325,7 +333,12 @@ async function buildMemberPendingMonths(memberId, settings) {
     memberPayments.get(payment.month).push(payment);
   }
 
-  const { monthsResult } = buildMonthsResult(months, memberPayments, settings.monthlyFee, memberJoinMonthKey(member));
+  const { monthsResult } = buildMonthsResult(
+    months,
+    memberPayments,
+    (monthKey) => resolveFee('member', monthKey),
+    memberJoinMonthKey(member)
+  );
 
   return Object.entries(monthsResult)
     .filter(([key, month]) => month.status === 'pending' || key === currentKey)

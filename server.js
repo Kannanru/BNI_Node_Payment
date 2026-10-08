@@ -4,19 +4,17 @@ const env = require('./config/env');
 const Payment = require('./models/Payment');
 const { ensureMasterData } = require('./seed/ensureMasterData');
 const { readMembers, importMembersFromFileIfEmpty } = require('./utils/membersData');
-const { readAllowedUsers } = require('./utils/allowedUsersData');
-const { normalizePhone, maskPhone } = require('./utils/phone');
+const User = require('./models/User');
+const { maskPhone } = require('./utils/phone');
 const { isSmsConfigured } = require('./utils/sms');
 
-// Prints exactly what was loaded from allowedUsers.json and the member
-// roster file on every boot, by name - not just a count - so a manual edit
-// to either file is immediately, visibly confirmed (or its absence is
-// immediately obvious) in the same terminal `npm start` runs in, with
-// nothing left to take on faith.
+// Prints the login accounts and member roster this server is actually using
+// (both from the database) on every boot, by name - so it's always visible
+// which data this server has, independent of any file in the code.
 async function logLoadedMasterData() {
-  const users = readAllowedUsers();
-  const summary = users.map((u) => `${u.name} (${normalizePhone(u.phone) ? maskPhone(normalizePhone(u.phone)) : 'NO VALID PHONE'})`);
-  console.log(`[startup] allowedUsers.json: ${users.length} account(s) - ${summary.join(', ')}`);
+  const users = await User.find({ role: 'admin' }).sort({ name: 1 }).lean();
+  const summary = users.map((u) => `${u.name} (${maskPhone(u.phone)})`);
+  console.log(`[startup] Allowed users (database): ${users.length} login(s) - ${summary.join(', ')}`);
   console.log(
     isSmsConfigured()
       ? '[startup] Login OTP: sending real SMS via Saptel.'

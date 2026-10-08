@@ -7,11 +7,11 @@ const {
   addMember,
   updateMemberById,
 } = require('../utils/membersData');
-const { updateAllowedUserPhone } = require('../utils/allowedUsersData');
 const User = require('../models/User');
 const { normalizePhone } = require('../utils/phone');
 const { actorFrom, diff, logAudit } = require('../utils/audit');
 const { buildMemberTimeline } = require('../utils/memberHistory');
+const { loadFeeResolver, currentFees } = require('../utils/feeSchedule');
 
 const DEFAULT_PAGE_SIZE = 15;
 
@@ -96,7 +96,8 @@ async function listMembers(req, res, next) {
       total: sorted.length,
       hasMore: start + pageMembers.length < sorted.length,
       totalPendingSum,
-      monthlyFee: settings.monthlyFee,
+      // This month's member fee (each month's own fee is its totalDue).
+      monthlyFee: currentFees(await loadFeeResolver(settings)).member,
     });
   } catch (err) {
     next(err);
@@ -116,7 +117,7 @@ async function getPendingMonths(req, res, next) {
     const settings = await getOrCreateSettings();
     const pendingMonths = await buildMemberPendingMonths(memberId, settings);
 
-    res.json({ pendingMonths, monthlyFee: settings.monthlyFee });
+    res.json({ pendingMonths, monthlyFee: currentFees(await loadFeeResolver(settings)).member });
   } catch (err) {
     next(err);
   }
@@ -221,7 +222,7 @@ async function updateMember(req, res, next) {
     // A member who is an Admin logs in with their phone - move their login to
     // the new number so changing it here doesn't lock them out.
     const oldPhone = normalizePhone(result.before.phone);
-    if (phone && oldPhone && oldPhone !== phone && updateAllowedUserPhone(oldPhone, phone)) {
+    if (phone && oldPhone && oldPhone !== phone) {
       await User.updateOne({ phone: oldPhone }, { $set: { phone } });
     }
 

@@ -1,12 +1,11 @@
 const User = require('../models/User');
 const { readMembers, findMemberById } = require('../utils/membersData');
-const { addAllowedUsers, removeAllowedUsers } = require('../utils/allowedUsersData');
 const { normalizePhone } = require('../utils/phone');
 
 // Powers the Admin Access screen's list - every account that currently has
 // admin privileges, most recently granted first so a just-promoted member
 // shows up at the top. Deliberately includes accounts with no corresponding
-// member record (e.g. staff logins seeded straight into allowedUsers.json) -
+// member record (e.g. staff logins added with `npm run admins`) -
 // this is "who can log in as Admin right now", a strictly larger set than
 // "which members are Admins" (see listMembersForPicker).
 async function listAdmins(req, res, next) {
@@ -57,13 +56,9 @@ async function listMembersForPicker(req, res, next) {
   }
 }
 
-// Promotes one member into a full Admin account. Nothing to hand out - they
-// simply log in with an OTP sent to the mobile number on file. Doesn't touch
-// config/allowedUsers.json itself - the caller collects every newly-allowed
-// entry across the whole batch and writes it once (see setMemberAdmins)
-// rather than this function reading and rewriting that file on every single
-// call, which is both slower for a multi-select batch and, if ever run
-// concurrently, a lost-update race.
+// Promotes one member into a full Admin account (a login in the database).
+// Nothing to hand out - they simply log in with an OTP sent to the mobile
+// number on file.
 //
 // `adminPhones` is the caller's running set of every number that already has
 // (or, earlier in this same batch, just gained) Admin access - checked
@@ -94,19 +89,17 @@ async function promoteOneMember(memberId, adminPhones) {
   return {
     ok: true,
     admin: { id: user.id, name: user.name, phone: user.phone },
-    allowedEntry: { phone, name: member.name, ...(email ? { email } : {}) },
   };
 }
 
 // Reconciles Admin status for members against the caller's desired complete
 // set (memberIds = everyone who should end up checked). Anyone currently
 // Admin-via-membership but missing from that set is demoted back to a plain
-// Member - their login is deleted outright (Mongo User doc AND their
-// config/allowedUsers.json entry) rather than just marking a role, since a
-// Member has no login account at all in this app's model.
+// Member - their login account is removed, since a Member has no login at
+// all in this app's model.
 //
-// Runs every promotion/demotion sequentially (not Promise.all) so the
-// allowedUsers.json write at the end reflects every change from this save.
+// Runs every promotion/demotion sequentially (not Promise.all) so a batch
+// that selects two members sharing a number is caught (see adminPhones).
 async function setMemberAdmins(req, res, next) {
   try {
     if (!Array.isArray(req.body.memberIds)) {
@@ -136,14 +129,11 @@ async function setMemberAdmins(req, res, next) {
     const promoted = [];
     const demoted = [];
     const failed = [];
-    const newAllowedEntries = [];
-    const removedPhones = [];
 
     for (const memberId of toPromote) {
       const result = await promoteOneMember(memberId, adminPhones);
       if (result.ok) {
         promoted.push(result.admin);
-        newAllowedEntries.push(result.allowedEntry);
       } else {
         failed.push({ memberId: result.memberId, name: result.name, message: result.message });
       }
@@ -153,13 +143,12 @@ async function setMemberAdmins(req, res, next) {
       const member = membersById.get(memberId);
       const phone = normalizePhone(member.phone);
       await User.deleteOne({ phone });
-      removedPhones.push(phone);
       demoted.push({ id: memberId, name: member.name, phone });
     }
 
-    if (newAllowedEntries.length) addAllowedUsers(newAllowedEntries);
-    if (removedPhones.length) removeAllowedUsers(removedPhones);
-
+    // Admin logins live only in the database (see ensureMasterData.js's
+    // ensureUsers) - the User documents created/deleted above ARE the change;
+    // no file is written, so a code deploy can never undo or overwrite it.
     res.json({ promoted, demoted, failed });
   } catch (err) {
     next(err);

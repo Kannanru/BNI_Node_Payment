@@ -24,6 +24,10 @@ const User = require('../models/User');
 const Payment = require('../models/Payment');
 const Visitor = require('../models/Visitor');
 const SeedState = require('../models/SeedState');
+const FeeSchedule = require('../models/FeeSchedule');
+const MonthlyFee = require('../models/MonthlyFee');
+const { loadFeeSchedule, levelFeeFromSchedule } = require('../utils/feeSchedule');
+const { monthKeyOf } = require('../utils/monthRange');
 const { readAllowedUsers } = require('../utils/allowedUsersData');
 const { readMembers } = require('../utils/membersData');
 const { normalizePhone } = require('../utils/phone');
@@ -57,15 +61,39 @@ function randomPaidAt(year, month, day) {
   return new Date(year, month - 1, day, hour, minute, second);
 }
 
-// Always kept present and in sync with config/allowedUsers.json - deletes
-// any User not on the allowlist, creates whatever's missing, and updates
-// any existing account whose name/email in the JSON no longer matches
-// what's stored (so editing an entry, not just adding one, takes effect on
-// the next restart with no code change). Accounts are keyed by mobile
-// number; an entry with a missing or invalid phone is skipped with a
-// warning (it can't log in until a valid number is filled in). Untouched by
-// the payment-data seeding below (separate collection, separate logic).
+// Login accounts (Allowed Users) live in the database - the users
+// collection is the ONLY source of truth. config/allowedUsers.json is read
+// at most ONCE per database, to create the first OTP login accounts, and is
+// never read again after that. So deploying new code (including whatever
+// copy of that file the code contains) can never add, change or remove a
+// production login. Manage logins afterwards with Admin Access in the app or
+// `npm run admins` (seed/manageAdmins.js).
+const USERS_IMPORT_KEY = 'allowed-users-import';
+
 async function ensureUsers() {
+  await User.syncIndexes().catch(() => {}); // see importUsersFromFile for the first-run case
+
+  if (await SeedState.exists({ key: USERS_IMPORT_KEY })) {
+    console.log('[seed] Allowed users: managed in the database - allowedUsers.json ignored.');
+    return;
+  }
+
+  // This database already has OTP login accounts (it ran the phone-login
+  // code before this rule existed) - those ARE its allowed users. Keep them
+  // exactly as they are and just record that the import is done.
+  if (await User.exists({ phone: { $exists: true } })) {
+    await SeedState.create({ key: USERS_IMPORT_KEY, note: 'Existing OTP accounts kept - file not imported.' });
+    console.log('[seed] Allowed users: existing accounts kept as-is; allowedUsers.json will no longer be used.');
+    return;
+  }
+
+  await importUsersFromFile();
+  await SeedState.create({ key: USERS_IMPORT_KEY, note: 'Imported from config/allowedUsers.json.' });
+}
+
+// First-ever OTP start on an empty database: creates the login accounts from
+// config/allowedUsers.json. Runs once (see ensureUsers).
+async function importUsersFromFile() {
   const allowedUsers = readAllowedUsers();
 
   const valid = [];
@@ -111,7 +139,7 @@ async function ensureUsers() {
       updated += 1;
     }
   }
-  console.log(`[seed] Users: ${valid.length} allowed, ${created} newly created, ${updated} updated.`);
+  console.log(`[seed] Allowed users: one-time import from allowedUsers.json - ${created} created, ${updated} updated.`);
 }
 
 // Parses the July sheet into the same shape as seedJulyOnly.js, but never
@@ -314,8 +342,125 @@ async function ensureVisitorCharges() {
   console.log(`[seed] Visitor charges: backfilled ${emptyChargeVisitors.length} visitor(s) with no charges at all.`);
 }
 
+// One-time move from the single fee values in Settings to month-wise fee
+// schedules (models/FeeSchedule.js). Built so every month keeps EXACTLY the
+// fee it is calculated with today:
+//   - member: one row, today's monthlyFee, from the earliest month anything
+//     is tracked or paid for (every month so far was calculated at that fee);
+//   - visitor/guest: their existing visitorFeeHistory/guestFeeHistory, by
+//     month (visitor/guest charges are already fixed on each visitor, so
+//     these rows only decide the fee for visitors added from now on), ending
+//     on today's value.
+// Runs once per database (SeedState) and never touches existing rows.
+const FEE_SCHEDULE_KEY = 'fee-schedule-v1';
+const MIGRATION_ACTOR = { name: 'System (fee schedule migration)' };
+
+function monthOfDate(date) {
+  const d = new Date(date);
+  return monthKeyOf(d.getFullYear(), d.getMonth() + 1);
+}
+
+function historyToRows(role, history, currentAmount, baseMonth, nowMonth) {
+  // Collapse to one amount per month (the last change in a month wins).
+  const byMonth = new Map();
+  for (const h of [...(history || [])].sort((a, b) => new Date(a.effectiveFrom) - new Date(b.effectiveFrom))) {
+    byMonth.set(monthOfDate(h.effectiveFrom), h.amount);
+  }
+  const rows = [...byMonth.entries()].map(([effectiveMonth, amount]) => ({ role, effectiveMonth, amount }));
+  if (!rows.length) rows.push({ role, effectiveMonth: baseMonth, amount: currentAmount });
+  // The earliest row covers everything before it too.
+  if (rows[0].effectiveMonth > baseMonth) rows[0].effectiveMonth = baseMonth;
+  // Today's value must be the fee in effect now, whatever the history says.
+  const last = rows[rows.length - 1];
+  if (last.amount !== currentAmount) {
+    if (last.effectiveMonth === nowMonth) last.amount = currentAmount;
+    else rows.push({ role, effectiveMonth: nowMonth, amount: currentAmount });
+  }
+  return rows;
+}
+
+async function ensureFeeSchedule() {
+  if (await SeedState.exists({ key: FEE_SCHEDULE_KEY })) return;
+
+  if ((await FeeSchedule.estimatedDocumentCount()) > 0) {
+    await SeedState.create({ key: FEE_SCHEDULE_KEY, note: 'Schedule already present.' });
+    return;
+  }
+
+  const settings = await getOrCreateSettings();
+  const now = new Date();
+  const nowMonth = monthKeyOf(now.getFullYear(), now.getMonth() + 1);
+
+  const firstPayment = await Payment.findOne({}).sort({ month: 1 }).select('month').lean();
+  const firstVisitor = await Visitor.findOne({}).setOptions({ withDeleted: true }).sort({ createdAt: 1 }).select('createdAt').lean();
+  const baseMonth = [
+    settings.defaultStartMonth,
+    settings.columnDisplayStartMonth,
+    firstPayment?.month,
+    firstVisitor ? monthOfDate(firstVisitor.createdAt) : null,
+    nowMonth,
+  ]
+    .filter(Boolean)
+    .sort()[0];
+
+  const rows = [
+    { role: 'member', effectiveMonth: baseMonth, amount: settings.monthlyFee },
+    ...historyToRows('visitor', settings.visitorFeeHistory, settings.visitorFee, baseMonth, nowMonth),
+    ...historyToRows('guest', settings.guestFeeHistory, settings.guestFee, baseMonth, nowMonth),
+  ].map((r) => ({ ...r, note: 'Migrated from the previous single fee setting', createdBy: MIGRATION_ACTOR }));
+
+  await FeeSchedule.insertMany(rows);
+  await SeedState.create({ key: FEE_SCHEDULE_KEY, note: `Created ${rows.length} fee schedule row(s).` });
+  console.log(
+    `[fees] Fee schedule created from current settings: ${rows
+      .map((r) => `${r.role} ₹${r.amount} from ${r.effectiveMonth}`)
+      .join(', ')}`
+  );
+}
+
+// One-time switch to "a month costs only the fee configured for it" (0 when
+// none is configured). Before switching, every month that ALREADY has
+// payments recorded - and so is locked - gets its fee saved as it is today
+// (from the older from-month-onward schedule), so no paid month's fee or
+// balance changes. Months without payments and without a configured fee
+// become 0 until a fee is saved for them. Runs once per database.
+const EXPLICIT_FEES_KEY = 'monthly-fees-explicit-v1';
+const LOCKED_KEEP_ACTOR = { name: 'System (kept – payments recorded)' };
+
+async function ensureLockedMonthFees() {
+  if (await SeedState.exists({ key: EXPLICIT_FEES_KEY })) return;
+
+  const schedule = await loadFeeSchedule();
+  const paidMonths = { member: new Set(await Payment.distinct('month')), visitor: new Set(), guest: new Set() };
+  const paidVisitors = await Visitor.find({ 'charges.payments.0': { $exists: true } })
+    .setOptions({ withDeleted: true })
+    .select('type createdAt')
+    .lean();
+  for (const v of paidVisitors) {
+    paidMonths[v.type === 'guest' ? 'guest' : 'visitor'].add(monthOfDate(v.createdAt));
+  }
+
+  const rows = [];
+  for (const [role, months] of Object.entries(paidMonths)) {
+    for (const month of months) {
+      if (schedule.monthly.has(`${role}|${month}`)) continue; // already configured
+      const amount = levelFeeFromSchedule(schedule, role, month);
+      if (amount === null) continue;
+      rows.push({ role, month, amount, createdBy: LOCKED_KEEP_ACTOR, updatedBy: LOCKED_KEEP_ACTOR });
+    }
+  }
+  if (rows.length) await MonthlyFee.insertMany(rows);
+  await SeedState.create({ key: EXPLICIT_FEES_KEY, note: `Kept fees for ${rows.length} month(s) with payments.` });
+  console.log(
+    `[fees] Unconfigured months now cost 0. Kept the fee of ${rows.length} month(s) that already had payments` +
+      (rows.length ? `: ${rows.map((r) => `${r.role} ${r.month} ₹${r.amount}`).join(', ')}` : '.')
+  );
+}
+
 async function ensureMasterData() {
   await ensureUsers();
+  await ensureFeeSchedule();
+  await ensureLockedMonthFees();
   await ensureJulyPaymentData();
   await ensureVisitorCharges();
 }

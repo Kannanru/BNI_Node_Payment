@@ -2,8 +2,9 @@ const Visitor = require('../models/Visitor');
 const { findMemberById } = require('../utils/membersData');
 const { getOrCreateSettings } = require('../utils/getSettings');
 const { buildVisitorStatus } = require('../utils/paymentCalculator');
-const { validateMethodFields, attributionFrom, logVisitorPayment } = require('./paymentController');
+const { validateMethodFields, attributionFrom, logVisitorPayment, parsePaidAt } = require('./paymentController');
 const { actorFrom, diff, logAudit } = require('../utils/audit');
+const { loadFeeResolver, currentFees } = require('../utils/feeSchedule');
 
 function visitorDetails(visitor) {
   return {
@@ -32,7 +33,9 @@ async function createVisitor(req, res, next) {
 
     const resolvedType = type === 'guest' ? 'guest' : 'visitor';
     const settings = await getOrCreateSettings();
-    const fee = resolvedType === 'guest' ? settings.guestFee : settings.visitorFee;
+    // This month's visitor/guest fee from the fee schedule, fixed onto this
+    // visitor's charge - a later fee change never alters it.
+    const fee = currentFees(await loadFeeResolver(settings))[resolvedType];
 
     const visitor = await Visitor.create({
       memberId,
@@ -104,11 +107,13 @@ async function recordVisitorPayment(req, res, next) {
     if (typeof amount !== 'number' || amount <= 0) {
       return res.status(400).json({ message: 'amount must be a positive number' });
     }
+    const { paidAt, error: paidAtError } = parsePaidAt(req.body.paidAt);
+    if (paidAtError) return res.status(400).json({ message: paidAtError });
 
     charge.payments.push({
       method,
       amount,
-      paidAt: new Date(),
+      paidAt,
       ...(method === 'card' ? { cardLastFour } : {}),
       ...attributionFrom(req, { remarks, transactionRef }),
     });

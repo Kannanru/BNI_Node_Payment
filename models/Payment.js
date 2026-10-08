@@ -25,6 +25,11 @@ const paymentSchema = new mongoose.Schema(
     recordedByEmail: { type: String, trim: true },
     recordedById: { type: String, trim: true },
     recordedByPhone: { type: String, trim: true },
+    // Set when one payment received from the member was spread over several
+    // months (POST /api/payments/allocate): every month's share is its own
+    // Payment document, all sharing this id, so the original single payment
+    // can always be shown as one receipt. Absent on single-month payments.
+    receiptId: { type: String, index: true },
     // Latest edit (the full old -> new trail of every edit is in AuditLog).
     lastEditedAt: { type: Date },
     lastEditedByName: { type: String, trim: true },

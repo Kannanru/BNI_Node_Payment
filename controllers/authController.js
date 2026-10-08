@@ -3,7 +3,6 @@ const env = require('../config/env');
 const User = require('../models/User');
 const Otp = require('../models/Otp');
 const { signToken } = require('../utils/jwt');
-const { readAllowedUsers } = require('../utils/allowedUsersData');
 const { normalizePhone } = require('../utils/phone');
 const { sendOtpSms } = require('../utils/sms');
 
@@ -27,11 +26,11 @@ function generateCode() {
 
 const NOT_REGISTERED_MESSAGE = 'This mobile number is not registered. Please contact the admin.';
 
-// Only numbers listed in allowedUsers.json may ever receive a code or a
-// token, even if a stray User document exists in the database. Read fresh
-// on every call (not cached at module load).
-function isAllowedPhone(phone) {
-  return readAllowedUsers().some((u) => normalizePhone(u.phone) === phone);
+// Only numbers with an admin login account in the database may ever receive
+// a code or a token. The users collection is the single source of truth for
+// Allowed Users (see seed/ensureMasterData.js#ensureUsers).
+async function isAllowedPhone(phone) {
+  return Boolean(await User.exists({ phone, role: 'admin' }));
 }
 
 // Step 1 of login: texts a 6-digit code to an allowlisted mobile number. An
@@ -45,7 +44,7 @@ async function requestOtp(req, res, next) {
       return res.status(400).json({ message: 'Enter a valid 10-digit mobile number' });
     }
 
-    if (!isAllowedPhone(phone) || !(await User.exists({ phone }))) {
+    if (!(await isAllowedPhone(phone))) {
       return res.status(404).json({ message: NOT_REGISTERED_MESSAGE });
     }
 
@@ -125,9 +124,9 @@ async function verifyOtp(req, res, next) {
 
     await Otp.deleteOne({ _id: otp._id });
 
-    // Re-checked here too: the number could have been removed from the
-    // allowlist between sending the code and entering it.
-    const user = isAllowedPhone(phone) ? await User.findOne({ phone }) : null;
+    // Re-checked here too: the login could have been removed between
+    // sending the code and entering it.
+    const user = await User.findOne({ phone, role: 'admin' });
     if (!user) {
       return res.status(404).json({ message: NOT_REGISTERED_MESSAGE });
     }
