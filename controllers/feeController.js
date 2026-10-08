@@ -73,9 +73,8 @@ async function syncLegacySettingsFees() {
 
 // Older single-fee API (POST /api/fees, and Settings PUT from older app
 // versions): sets the fee for [effectiveMonth] ONLY - the current month or a
-// later one - exactly like saving that one month in Fee Settings. Refused if
-// the month already has payments (its fee is locked). Returns { row } or
-// { error, status }.
+// later one - exactly like saving that one month in Fee Settings. Returns
+// { row } or { error, status }.
 async function applyFeeChange({ role, effectiveMonth, amount, actor }) {
   if (!ROLES.includes(role)) return { status: 400, error: `role must be one of ${ROLES.join(', ')}` };
   if (!MONTH_REGEX.test(effectiveMonth || '')) return { status: 400, error: 'effectiveMonth must be in YYYY-MM format' };
@@ -84,13 +83,6 @@ async function applyFeeChange({ role, effectiveMonth, amount, actor }) {
   }
   if (effectiveMonth < currentMonthKey()) {
     return { status: 400, error: 'Use Fee Settings to set the fee of an earlier month.' };
-  }
-  const locked = await monthsWithPayments(role, [effectiveMonth]);
-  if (locked.size) {
-    return {
-      status: 409,
-      error: `Payments are already recorded for ${monthName(effectiveMonth)} - the fee for a month with payments can't be changed.`,
-    };
   }
 
   let row = await MonthlyFee.findOne({ role, month: effectiveMonth });
@@ -167,9 +159,12 @@ async function buildYearView(role, year, settings) {
       name: MONTH_NAMES[m - 1],
       amount: resolve(role, key),
       source: own ? 'set' : 'default',
+      // Every month can be edited. hasPayments is only shown/warned about -
+      // changing a month that already has payments recalculates what is
+      // still owed for it; the recorded payments themselves never change.
       hasPayments,
-      locked: hasPayments,
-      editable: !hasPayments,
+      locked: false,
+      editable: true,
       isPast: key < nowMonth,
       isCurrent: key === nowMonth,
       setByName: own ? (own.updatedBy || own.createdBy)?.name || null : null,
@@ -213,15 +208,6 @@ async function saveFeeMonths(req, res, next) {
         return res.status(400).json({ message: `Enter a valid amount for ${monthName(e.month)}` });
       }
     }
-    // A month with any payment recorded is locked - checked for every entry
-    // before anything is written.
-    const locked = await monthsWithPayments(role, [...seen]);
-    if (locked.size) {
-      return res.status(409).json({
-        message: `Payments are already recorded for ${[...locked].sort().map(monthName).join(', ')} - the fee for a month with payments can't be changed.`,
-      });
-    }
-
     const actor = actorFrom(req);
     for (const e of entries) {
       const existing = await MonthlyFee.findOne({ role, month: e.month });

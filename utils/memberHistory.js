@@ -3,7 +3,7 @@ const Visitor = require('../models/Visitor');
 const AuditLog = require('../models/AuditLog');
 const { findMemberById } = require('./membersData');
 const { buildMonthRange, parseMonthKey, monthKeyOf, MONTH_LABELS } = require('./monthRange');
-const { isVisitorInScope } = require('./paymentCalculator');
+const { isVisitorInScope, monthStatus } = require('./paymentCalculator');
 const { loadFeeResolver, currentFees, currentMonthKey } = require('./feeSchedule');
 
 const METHOD_LABELS = { upi: 'UPI', card: 'Card', cash: 'Cash' };
@@ -158,7 +158,8 @@ function buildMonthStatuses(member, payments, settings, resolveFee) {
       totalDue: fee,
       paid,
       remaining,
-      status: remaining <= 0 ? 'paid' : paid > 0 ? 'partial' : 'pending',
+      excess: Math.max(paid - fee, 0), // paid beyond the fee - an adjustment
+      status: monthStatus(fee, paid),
     };
   });
 }
@@ -354,7 +355,8 @@ async function buildMemberTimeline(memberId, settings) {
     summary: {
       monthlyFee: currentFees(resolveFee).member, // this month's fee
       trackedFrom: months.length ? months[0].monthKey : null,
-      monthsPaid: months.filter((m) => m.status === 'paid').length,
+      monthsPaid: months.filter((m) => m.status === 'paid' || m.status === 'overpaid').length,
+      adjustmentTotal: months.reduce((s, m) => s + m.excess, 0),
       monthsPending: pendingMonths.length,
       totalPaidMembership: sum(payments, 'amount'),
       totalPaidVisitors: sum(paymentRows.filter((p) => p.kind !== 'membership'), 'amount'),
@@ -363,6 +365,8 @@ async function buildMemberTimeline(memberId, settings) {
     },
     months,
     pendingMonths,
+    // Months paid beyond their fee - the extra is shown as an adjustment.
+    adjustments: months.filter((m) => m.excess > 0),
     pendingVisitors,
     payments: paymentRows,
     timeline: events,

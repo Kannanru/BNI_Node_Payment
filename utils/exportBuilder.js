@@ -35,10 +35,13 @@ function paidAtMonthKey(date) {
   return monthKeyOf(d.getFullYear(), d.getMonth() + 1);
 }
 
+// Same rule as paymentCalculator.monthStatus: Paid only when something was
+// actually paid and it covers what's due; paying more is shown as Overpaid.
 function statusOf(paid, expected) {
-  if (paid >= expected && expected > 0) return 'Paid';
-  if (paid > 0) return 'Partial';
-  return 'Pending';
+  if (expected <= 0) return paid > 0 ? 'Overpaid' : 'No fee';
+  if (paid <= 0) return 'Pending';
+  if (paid < expected) return 'Partial';
+  return paid > expected ? 'Overpaid' : 'Paid';
 }
 
 // Distinct, order-preserving values joined for a cell that summarizes

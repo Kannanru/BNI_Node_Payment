@@ -40,6 +40,21 @@ function memberJoinMonthKey(member) {
   return monthKeyOf(created.getFullYear(), created.getMonth() + 1);
 }
 
+// One status rule for every month everywhere (Home, sheets, history,
+// export). A month is only Paid when something was actually paid and it
+// covers the fee - a payment edited down to ₹0 leaves the month unpaid.
+//   'paid'     - paid exactly the fee
+//   'overpaid' - paid more than the fee (the extra is an adjustment)
+//   'partial'  - something paid, less than the fee
+//   'pending'  - nothing paid yet (or every payment edited to ₹0)
+//   'no_fee'   - no fee for the month and nothing paid
+function monthStatus(fee, paid) {
+  if (fee <= 0) return paid > 0 ? 'overpaid' : 'no_fee';
+  if (paid <= 0) return 'pending';
+  if (paid < fee) return 'partial';
+  return paid > fee ? 'overpaid' : 'paid';
+}
+
 function mapPaymentEntry(payment) {
   return {
     id: payment._id,
@@ -88,17 +103,20 @@ function buildMonthsResult(monthList, memberPaymentsByMonth, feeForMonth, joinKe
     }
     const amountPaid = transactions.reduce((sum, t) => sum + t.amount, 0);
     const remaining = Math.max(totalDue - amountPaid, 0);
-    const isPaid = remaining <= 0;
     const latestPaidAt = transactions.length
       ? transactions.reduce((latest, t) => (t.paidAt > latest ? t.paidAt : latest), transactions[0].paidAt)
       : null;
+    const status = monthStatus(totalDue, amountPaid);
 
     monthsResult[key] = {
       label,
-      status: isPaid ? 'paid' : 'pending',
+      // 'paid' | 'overpaid' | 'pending' (nothing or part paid) | 'no_fee'
+      status: status === 'partial' ? 'pending' : status,
       totalDue,
       amount: amountPaid,
       remaining,
+      // Paid beyond the fee - shown as an adjustment, never as money owed.
+      excess: Math.max(amountPaid - totalDue, 0),
       paidAt: latestPaidAt,
       payments: transactions.map(mapPaymentEntry),
     };
@@ -352,6 +370,7 @@ module.exports = {
   buildVisitorStatus,
   getPendingChargesForMonth,
   memberJoinMonthKey,
+  monthStatus,
   visitorMonthKey,
   isVisitorInScope,
 };
