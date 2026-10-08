@@ -65,4 +65,15 @@ function removeAllowedUsers(phones) {
   return removedCount;
 }
 
-module.exports = { readAllowedUsers, addAllowedUsers, removeAllowedUsers };
+// Moves an allowlisted login from [oldPhone] to [newPhone] (a member who is an
+// Admin got a new number). Returns false if [oldPhone] wasn't allowlisted.
+function updateAllowedUserPhone(oldPhone, newPhone) {
+  const users = readAllowedUsers();
+  const entry = users.find((u) => normalizePhone(u.phone) === oldPhone);
+  if (!entry) return false;
+  entry.phone = newPhone;
+  fs.writeFileSync(ALLOWED_USERS_FILE, JSON.stringify(users, null, 2) + '\n', 'utf-8');
+  return true;
+}
+
+module.exports = { readAllowedUsers, addAllowedUsers, removeAllowedUsers, updateAllowedUserPhone };

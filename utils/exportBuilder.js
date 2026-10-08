@@ -2,7 +2,7 @@ const Payment = require('../models/Payment');
 const Visitor = require('../models/Visitor');
 const { readMembers } = require('./membersData');
 const { buildMonthRangeBetween, monthKeyOf, parseMonthKey, shortMonthYearLabel } = require('./monthRange');
-const { visitorMonthKey, isVisitorInScope, buildVisitorStatus } = require('./paymentCalculator');
+const { visitorMonthKey, isVisitorInScope, buildVisitorStatus, memberJoinMonthKey } = require('./paymentCalculator');
 
 // Both explicitly pin timeZone to Asia/Kolkata rather than relying on the
 // server process's local timezone (toLocaleDateString/toLocaleTimeString
@@ -125,7 +125,7 @@ async function buildMemberExportSheet({ fromMonth, toMonth, settings }) {
   const monthKeys = monthList.map((m) => m.key);
   const monthKeySet = new Set(monthKeys);
 
-  const members = readMembers();
+  const members = await readMembers();
   const memberIds = members.map((m) => m.id);
 
   const [payments, visitors] = await Promise.all([
@@ -204,8 +204,14 @@ async function buildMemberExportSheet({ fromMonth, toMonth, settings }) {
     const collectors = new Set();
 
     const monthGroupCells = [];
+    const joinKey = memberJoinMonthKey(member);
     for (const { key } of monthList) {
       const transactions = byMonth.get(key) || [];
+      // A month before the member was added owes nothing - shown as "-".
+      if (joinKey && key < joinKey && transactions.length === 0) {
+        monthGroupCells.push('-', 0, 0, '', '', '', '');
+        continue;
+      }
       const { cells, paid, remaining } = monthCells(transactions, settings.monthlyFee);
       totalExpected += settings.monthlyFee;
       totalPaid += paid;
@@ -270,7 +276,7 @@ const TRANSACTION_HEADERS = [
 // than bucketed by calendar month, so a range narrower than a full month
 // only pulls in the transactions actually paid during it.
 async function buildTransactionExportSheet({ fromDate, toDate }) {
-  const members = readMembers();
+  const members = await readMembers();
   const memberById = new Map(members.map((m) => [m.id, m]));
   const memberIds = members.map((m) => m.id);
 

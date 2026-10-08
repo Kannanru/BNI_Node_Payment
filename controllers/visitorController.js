@@ -2,13 +2,23 @@ const Visitor = require('../models/Visitor');
 const { findMemberById } = require('../utils/membersData');
 const { getOrCreateSettings } = require('../utils/getSettings');
 const { buildVisitorStatus } = require('../utils/paymentCalculator');
-const { validateMethodFields } = require('./paymentController');
+const { validateMethodFields, attributionFrom, logVisitorPayment } = require('./paymentController');
+const { actorFrom, diff, logAudit } = require('../utils/audit');
+
+function visitorDetails(visitor) {
+  return {
+    name: visitor.name,
+    type: visitor.type || 'visitor',
+    ...(visitor.phone ? { phone: visitor.phone } : {}),
+    ...(visitor.email ? { email: visitor.email } : {}),
+  };
+}
 
 async function createVisitor(req, res, next) {
   try {
     const { memberId, name, email, phone, type } = req.body;
 
-    if (!memberId || !findMemberById(memberId)) {
+    if (!memberId || !(await findMemberById(memberId))) {
       return res.status(400).json({ message: 'Unknown memberId' });
     }
     if (!name || !name.trim()) {
@@ -35,6 +45,16 @@ async function createVisitor(req, res, next) {
       // settingsController.js#updateSettings) never alters this; it only
       // ever applies to one created after that change.
       charges: [{ amount: fee, effectiveFrom: new Date(), payments: [] }],
+      createdBy: actorFrom(req),
+    });
+
+    await logAudit({
+      action: 'visitor.create',
+      entityType: 'visitor',
+      entityId: visitor._id,
+      memberId,
+      details: { ...visitorDetails(visitor), fee },
+      actor: actorFrom(req),
     });
 
     res.status(201).json({ visitor: buildVisitorStatus(visitor, fee) });
@@ -47,7 +67,7 @@ async function createVisitor(req, res, next) {
 async function listVisitorsForMember(req, res, next) {
   try {
     const { memberId } = req.query;
-    if (!memberId || !findMemberById(memberId)) {
+    if (!memberId || !(await findMemberById(memberId))) {
       return res.status(400).json({ message: 'Unknown memberId' });
     }
     const settings = await getOrCreateSettings();
@@ -90,12 +110,10 @@ async function recordVisitorPayment(req, res, next) {
       amount,
       paidAt: new Date(),
       ...(method === 'card' ? { cardLastFour } : {}),
-      ...(req.user?.name ? { recordedByName: req.user.name } : {}),
-      ...(req.user?.email ? { recordedByEmail: req.user.email } : {}),
-      ...(remarks ? { remarks: String(remarks).trim() } : {}),
-      ...(transactionRef ? { transactionRef: String(transactionRef).trim() } : {}),
+      ...attributionFrom(req, { remarks, transactionRef }),
     });
     await visitor.save();
+    await logVisitorPayment('visitor_payment.create', visitor, charge.payments[charge.payments.length - 1], actorFrom(req));
 
     const settings = await getOrCreateSettings();
     res.status(201).json({ visitor: buildVisitorStatus(visitor, settings.visitorFee) });
@@ -133,11 +151,20 @@ async function editVisitorPayment(req, res, next) {
       return res.status(400).json({ message: 'A reason is required to edit a payment' });
     }
 
+    const before = payment.toObject();
+    const actor = actorFrom(req);
     payment.method = method;
     payment.amount = amount;
     payment.cardLastFour = method === 'card' ? cardLastFour : undefined;
     payment.editReason = String(reason).trim();
+    payment.lastEditedAt = new Date();
+    payment.lastEditedByName = actor?.name;
     await visitor.save();
+
+    await logVisitorPayment('visitor_payment.update', visitor, payment, actor, {
+      reason: payment.editReason,
+      changes: diff(before, payment.toObject(), ['amount', 'method', 'cardLastFour']),
+    });
 
     const settings = await getOrCreateSettings();
     res.json({ visitor: buildVisitorStatus(visitor, settings.visitorFee) });
@@ -163,6 +190,7 @@ async function updateVisitor(req, res, next) {
       return res.status(404).json({ message: 'Visitor not found' });
     }
 
+    const before = visitor.toObject();
     if (name !== undefined) {
       if (!name || !name.trim()) {
         return res.status(400).json({ message: 'Name is required' });
@@ -173,6 +201,19 @@ async function updateVisitor(req, res, next) {
     if (phone !== undefined) visitor.phone = (phone || '').trim();
     await visitor.save();
 
+    const changes = diff(before, visitor.toObject(), ['name', 'email', 'phone']);
+    if (changes.length) {
+      await logAudit({
+        action: 'visitor.update',
+        entityType: 'visitor',
+        entityId: visitor._id,
+        memberId: visitor.memberId,
+        details: visitorDetails(visitor),
+        changes,
+        actor: actorFrom(req),
+      });
+    }
+
     const settings = await getOrCreateSettings();
     const fee = visitor.type === 'guest' ? settings.guestFee : settings.visitorFee;
     res.json({ visitor: buildVisitorStatus(visitor, fee) });
@@ -181,17 +222,32 @@ async function updateVisitor(req, res, next) {
   }
 }
 
-// Permanently removes a visitor and every payment transaction recorded
-// against their fee - there's nothing else referencing a visitor by id
-// (Payment documents are membership-fee only), so this is a clean delete
-// with no other records left dangling.
+// Soft-deletes a visitor/guest: hidden from the app (and from every total and
+// pending figure - see the query hook in models/Visitor.js), but the record
+// and its full payment history stay in the database, and the deletion goes
+// into the host member's history.
 async function deleteVisitor(req, res, next) {
   try {
     const { visitorId } = req.params;
-    const visitor = await Visitor.findByIdAndDelete(visitorId);
+    const actor = actorFrom(req);
+    const visitor = await Visitor.findOneAndUpdate(
+      { _id: visitorId },
+      { $set: { isDeleted: true, deletedAt: new Date(), deletedBy: actor } },
+      { new: true }
+    );
     if (!visitor) {
       return res.status(404).json({ message: 'Visitor not found' });
     }
+
+    const paid = visitor.charges.reduce((sum, c) => sum + c.payments.reduce((s, p) => s + p.amount, 0), 0);
+    await logAudit({
+      action: 'visitor.delete',
+      entityType: 'visitor',
+      entityId: visitor._id,
+      memberId: visitor.memberId,
+      details: { ...visitorDetails(visitor), totalPaid: paid },
+      actor,
+    });
     res.json({ success: true });
   } catch (err) {
     next(err);

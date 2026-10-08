@@ -1,94 +1,147 @@
 const fs = require('fs');
 const path = require('path');
 const env = require('../config/env');
+const Member = require('../models/Member');
 
+// The member roster lives in MongoDB (models/Member.js). data/members.json
+// (or MEMBERS_FILE) is only read ONCE - the first time the server starts with
+// an empty members collection - to import the existing roster; after that the
+// database is the only source of truth and the file is left as a backup.
 const DEFAULT_MEMBERS_FILE = path.join(__dirname, '..', 'data', 'members.json');
 
-// env.membersFile (from MEMBERS_FILE in .env, gitignored/local-only) lets
-// this specific machine point at a different file entirely - e.g. one
-// that's already open and edited directly in your editor - without
-// affecting the portable default anyone else (or production) gets.
 function membersFilePath() {
   return env.membersFile || DEFAULT_MEMBERS_FILE;
 }
 
-// Reads the member roster fresh on every call so edits to the file are
-// picked up immediately without restarting the server.
-function readMembers() {
+// The plain shape every caller works with - same fields the old JSON roster
+// had, plus creation/deletion info for the history timeline.
+function toPlain(doc) {
+  return {
+    id: doc.memberId,
+    name: doc.name,
+    phone: doc.phone || '',
+    ...(doc.email ? { email: doc.email } : {}),
+    createdAt: doc.createdAt,
+    createdBy: doc.createdBy || null,
+    importedFromFile: Boolean(doc.importedFromFile),
+    isDeleted: Boolean(doc.isDeleted),
+    deletedAt: doc.deletedAt || null,
+    deletedBy: doc.deletedBy || null,
+  };
+}
+
+// Active members in creation order. includeDeleted also returns soft-deleted
+// ones (history/seed lookups only - never shown in the app's lists).
+async function readMembers({ includeDeleted = false } = {}) {
+  const filter = includeDeleted ? {} : { isDeleted: { $ne: true } };
+  const docs = await Member.find(filter).sort({ seq: 1 }).lean();
+  return docs.map(toPlain);
+}
+
+async function findMemberById(id, { includeDeleted = false } = {}) {
+  if (!id) return null;
+  const filter = { memberId: String(id) };
+  if (!includeDeleted) filter.isDeleted = { $ne: true };
+  const doc = await Member.findOne(filter).lean();
+  return doc ? toPlain(doc) : null;
+}
+
+// Next "m<n>" id from the highest number ever issued - deleted members
+// included - so an id is never handed to a second person.
+async function nextMemberSeq() {
+  const last = await Member.findOne({}).sort({ seq: -1 }).select('seq').lean();
+  return (last ? last.seq : 0) + 1;
+}
+
+async function addMember({ name, phone }, actor) {
+  const seq = await nextMemberSeq();
+  const doc = await Member.create({
+    memberId: `m${seq}`,
+    seq,
+    name,
+    phone: phone || '',
+    createdBy: actor || null,
+  });
+  return toPlain(doc.toObject());
+}
+
+// Updates a member's name and/or phone (only the fields passed). Returns
+// { before, after }, or null if the member doesn't exist (or was deleted) so
+// callers can 404.
+async function updateMemberById(id, { name, phone }) {
+  const doc = await Member.findOne({ memberId: id, isDeleted: { $ne: true } });
+  if (!doc) return null;
+  const before = toPlain(doc.toObject());
+  if (name !== undefined) doc.name = name;
+  if (phone !== undefined) doc.phone = phone;
+  await doc.save();
+  return { before, after: toPlain(doc.toObject()) };
+}
+
+// Another active member already using this phone number, if any.
+async function findMemberByPhone(phone, { excludeId } = {}) {
+  const filter = { phone, isDeleted: { $ne: true } };
+  if (excludeId) filter.memberId = { $ne: excludeId };
+  const doc = await Member.findOne(filter).lean();
+  return doc ? toPlain(doc) : null;
+}
+
+// Soft delete - the member is hidden from the app but stays in the database
+// together with all their payments and visitors. Returns the deleted member,
+// or null if not found.
+async function softDeleteMember(id, actor) {
+  const doc = await Member.findOneAndUpdate(
+    { memberId: id, isDeleted: { $ne: true } },
+    { $set: { isDeleted: true, deletedAt: new Date(), deletedBy: actor || null } },
+    { new: true }
+  ).lean();
+  return doc ? toPlain(doc) : null;
+}
+
+// One-time import of the JSON roster into MongoDB. Runs on every start but
+// only does anything while the members collection is completely empty, so it
+// can never duplicate or overwrite members already in the database.
+async function importMembersFromFileIfEmpty() {
+  const existing = await Member.estimatedDocumentCount();
+  if (existing > 0) return { imported: 0 };
+
   const filePath = membersFilePath();
-  const raw = fs.readFileSync(filePath, 'utf-8');
+  if (!fs.existsSync(filePath)) {
+    console.warn(`[members] No members in the database and no ${filePath} to import from.`);
+    return { imported: 0 };
+  }
+
   let members;
   try {
-    members = JSON.parse(raw);
+    members = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
   } catch (err) {
-    // Hand-editing this file is the expected workflow, so a syntax mistake
-    // - most often a trailing comma before ']' or '}', or a missing comma
-    // between entries - is the most likely failure here. Surface that
-    // plainly instead of letting a bare "Unexpected token" from JSON.parse
-    // (with no file name attached) be the only clue.
-    throw new Error(
-      `${filePath} contains invalid JSON (${err.message}). ` +
-        'Check for a trailing comma before "]" or "}", or a missing comma between entries, then save and restart.'
-    );
+    throw new Error(`${filePath} contains invalid JSON (${err.message}) - fix it, then restart to import members.`);
   }
-  if (!Array.isArray(members)) {
-    throw new Error(`${filePath} must contain an array of members`);
-  }
-  return members;
+  if (!Array.isArray(members)) throw new Error(`${filePath} must contain an array of members`);
+
+  const docs = members.map((m) => {
+    const match = /^m(\d+)$/.exec(m.id || '');
+    if (!match) throw new Error(`Member "${m.name}" in ${filePath} has an invalid id "${m.id}"`);
+    return {
+      memberId: m.id,
+      seq: Number(match[1]),
+      name: String(m.name || '').trim(),
+      phone: m.phone || '',
+      ...(m.email ? { email: m.email } : {}),
+      importedFromFile: true,
+    };
+  });
+  await Member.insertMany(docs);
+  console.log(`[members] Imported ${docs.length} member(s) from ${filePath} into the database (one-time).`);
+  return { imported: docs.length };
 }
 
-function findMemberById(id) {
-  return readMembers().find((m) => m.id === id) || null;
-}
-
-// Rewrites members.json without [id]. Returns false (no write performed) if
-// the id wasn't present, so callers can 404 instead of silently no-op-ing.
-function removeMemberById(id) {
-  const members = readMembers();
-  const filtered = members.filter((m) => m.id !== id);
-  if (filtered.length === members.length) return false;
-  fs.writeFileSync(membersFilePath(), JSON.stringify(filtered, null, 2) + '\n', 'utf-8');
-  return true;
-}
-
-// Ids are "m<number>" but members.json isn't append-only in practice
-// anymore now that deleteMember can leave gaps (e.g. m71 missing after a
-// delete) - so the next id is derived from the highest numeric suffix
-// currently present, not the array length, to avoid ever reissuing one that
-// used to belong to a deleted member.
-function nextMemberId(members) {
-  let max = 0;
-  for (const m of members) {
-    const match = /^m(\d+)$/.exec(m.id);
-    if (match) max = Math.max(max, Number(match[1]));
-  }
-  return `m${max + 1}`;
-}
-
-// Appends a new member to members.json and returns the created record.
-function addMember({ name, phone }) {
-  const members = readMembers();
-  const member = { id: nextMemberId(members), name, phone };
-  members.push(member);
-  fs.writeFileSync(membersFilePath(), JSON.stringify(members, null, 2) + '\n', 'utf-8');
-  return member;
-}
-
-// Renames an existing member in place. Deliberately name-only - email is
-// never accepted here (see memberController.js#updateMember) since it's
-// stored purely for backend use (Admin Access conversion) and is never
-// surfaced to the UI at all; an edit flow that showed/collected it would
-// put it on screen for the first time. id is immutable (it's the foreign
-// key Payment.memberId/Visitor.memberId reference) and isn't accepted
-// either. Returns null (no write performed) if the id doesn't exist, so
-// callers can 404 instead of silently no-op-ing.
-function updateMemberById(id, { name }) {
-  const members = readMembers();
-  const member = members.find((m) => m.id === id);
-  if (!member) return null;
-  member.name = name;
-  fs.writeFileSync(membersFilePath(), JSON.stringify(members, null, 2) + '\n', 'utf-8');
-  return member;
-}
-
-module.exports = { readMembers, findMemberById, removeMemberById, addMember, updateMemberById };
+module.exports = {
+  readMembers,
+  findMemberById,
+  addMember,
+  updateMemberById,
+  findMemberByPhone,
+  softDeleteMember,
+  importMembersFromFileIfEmpty,
+};

@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const Member = require('./Member');
 
 // One visitor-fee payment transaction, same shape as a Payment document -
 // a visitor's fee can be paid across several methods (e.g. 2,000 Cash and
@@ -14,6 +15,10 @@ const visitorPaymentSchema = new mongoose.Schema(
     remarks: { type: String, trim: true }, // optional free-text note entered by the recorder
     recordedByName: { type: String, trim: true }, // who was logged in when this transaction was created
     recordedByEmail: { type: String, trim: true },
+    recordedById: { type: String, trim: true },
+    recordedByPhone: { type: String, trim: true },
+    lastEditedAt: { type: Date },
+    lastEditedByName: { type: String, trim: true },
   },
   { timestamps: true }
 );
@@ -58,8 +63,25 @@ const visitorSchema = new mongoose.Schema(
     // payments array any more, so a payment can never be ambiguous about
     // which due record it belongs to.
     charges: { type: [visitorChargeSchema], default: [] },
+    // Soft delete: a deleted visitor/guest stays in the database (with its
+    // full payment history) and only disappears from the app. Who created
+    // and who deleted it is recorded for the member's history timeline.
+    createdBy: { type: Member.actorSchema, default: null },
+    isDeleted: { type: Boolean, default: false, index: true },
+    deletedAt: { type: Date },
+    deletedBy: { type: Member.actorSchema, default: undefined },
   },
   { timestamps: true }
 );
+
+// Every query hides soft-deleted visitors automatically, so no list, total,
+// payment or export can ever pick one up by accident. Pass
+// .setOptions({ withDeleted: true }) to see them (history timeline only).
+function excludeDeleted() {
+  if (this.getOptions().withDeleted) return;
+  if (Object.prototype.hasOwnProperty.call(this.getFilter(), 'isDeleted')) return;
+  this.where({ isDeleted: { $ne: true } });
+}
+visitorSchema.pre(['find', 'findOne', 'findOneAndUpdate', 'countDocuments', 'updateOne', 'updateMany'], excludeDeleted);
 
 module.exports = mongoose.model('Visitor', visitorSchema);

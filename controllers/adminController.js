@@ -37,7 +37,7 @@ async function listMembersForPicker(req, res, next) {
     const admins = await User.find({ role: 'admin' }).select('phone').lean();
     const adminPhones = new Set(admins.map((u) => u.phone));
 
-    const members = readMembers()
+    const members = (await readMembers())
       .slice()
       .sort((a, b) => a.name.localeCompare(b.name));
 
@@ -70,7 +70,7 @@ async function listMembersForPicker(req, res, next) {
 // instead of a fresh Mongo query so that selecting two members who happen to
 // share a number within one batch is caught too.
 async function promoteOneMember(memberId, adminPhones) {
-  const member = findMemberById(memberId);
+  const member = await findMemberById(memberId);
   if (!member) {
     return { ok: false, memberId, message: 'Member not found' };
   }
@@ -114,7 +114,7 @@ async function setMemberAdmins(req, res, next) {
     }
     const desiredIds = new Set(req.body.memberIds.map((id) => String(id).trim()).filter(Boolean));
 
-    const members = readMembers();
+    const members = await readMembers();
     const membersById = new Map(members.map((m) => [m.id, m]));
 
     const admins = await User.find({ role: 'admin' }).select('phone').lean();

@@ -7,6 +7,12 @@
 // transaction for the seeded months is cleared first, then regenerated, so
 // the result always matches what was just rolled - no leftover duplicates.
 // Usage: node seed/seedPayments.js
+// DISABLED: this script deletes the seeded months' payments before
+// re-creating them, which breaks the rule that data is never permanently
+// removed. Kept only for reference - it refuses to run.
+console.error('seedPayments.js is disabled: it would permanently delete payments.');
+process.exit(1);
+
 const connectDB = require('../config/db');
 const Payment = require('../models/Payment');
 const { readMembers } = require('../utils/membersData');

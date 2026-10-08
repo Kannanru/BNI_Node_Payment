@@ -15,6 +15,12 @@
 const path = require('path');
 const ExcelJS = require('exceljs');
 const mongoose = require('mongoose');
+// DISABLED: this script deletes EVERY payment and visitor before importing,
+// which breaks the rule that data is never permanently removed. Kept only for
+// reference - it refuses to run.
+console.error('seedJulyOnly.js is disabled: it would permanently delete all payments and visitors.');
+process.exit(1);
+
 const connectDB = require('../config/db');
 const Payment = require('../models/Payment');
 const Visitor = require('../models/Visitor');

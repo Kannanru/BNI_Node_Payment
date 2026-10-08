@@ -3,8 +3,62 @@ const Visitor = require('../models/Visitor');
 const { findMemberById } = require('../utils/membersData');
 const { getOrCreateSettings } = require('../utils/getSettings');
 const { getPendingChargesForMonth } = require('../utils/paymentCalculator');
+const { actorFrom, diff, logAudit } = require('../utils/audit');
 
 const VALID_METHODS = ['upi', 'card', 'cash'];
+
+// Who recorded a transaction (stamped on it at creation and never changed by
+// an edit), plus the optional note/reference the recorder typed in.
+function attributionFrom(req, { remarks, transactionRef } = {}) {
+  return {
+    ...(req.user?.name ? { recordedByName: req.user.name } : {}),
+    ...(req.user?.email ? { recordedByEmail: req.user.email } : {}),
+    ...(req.user?.id ? { recordedById: String(req.user.id) } : {}),
+    ...(req.user?.phone ? { recordedByPhone: req.user.phone } : {}),
+    ...(remarks ? { remarks: String(remarks).trim() } : {}),
+    ...(transactionRef ? { transactionRef: String(transactionRef).trim() } : {}),
+  };
+}
+
+function logPaymentCreated(payment, actor) {
+  return logAudit({
+    action: 'payment.create',
+    entityType: 'payment',
+    entityId: payment._id,
+    memberId: payment.memberId,
+    details: {
+      month: payment.month,
+      amount: payment.amount,
+      method: payment.method,
+      ...(payment.cardLastFour ? { cardLastFour: payment.cardLastFour } : {}),
+      ...(payment.transactionRef ? { transactionRef: payment.transactionRef } : {}),
+      ...(payment.remarks ? { remarks: payment.remarks } : {}),
+    },
+    actor,
+    at: payment.paidAt,
+  });
+}
+
+// One visitor/guest fee transaction - filed under the visitor's host member.
+function logVisitorPayment(action, visitor, payment, actor, extra = {}) {
+  return logAudit({
+    action,
+    entityType: 'visitor_payment',
+    entityId: payment._id,
+    memberId: visitor.memberId,
+    details: {
+      visitorId: String(visitor._id),
+      visitorName: visitor.name,
+      visitorType: visitor.type || 'visitor',
+      amount: payment.amount,
+      method: payment.method,
+      ...(payment.cardLastFour ? { cardLastFour: payment.cardLastFour } : {}),
+      ...extra,
+    },
+    changes: extra.changes || [],
+    actor,
+  });
+}
 
 function validateMethodFields(method, cardLastFour) {
   if (!VALID_METHODS.includes(method)) {
@@ -37,7 +91,7 @@ async function recordPayment(req, res, next) {
   try {
     const { memberId, month, method, amount, cardLastFour, remarks, transactionRef } = req.body;
 
-    if (!memberId || !findMemberById(memberId)) {
+    if (!memberId || !(await findMemberById(memberId))) {
       return res.status(400).json({ message: 'Unknown memberId' });
     }
     if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month || '')) {
@@ -57,12 +111,8 @@ async function recordPayment(req, res, next) {
     // "Collected By"/"Remarks"/"Transaction Reference" columns can be filled
     // in for payments recorded from here on. req.user.name is only present
     // on tokens issued after this field was added - see authMiddleware.
-    const attributionFields = {
-      ...(req.user?.name ? { recordedByName: req.user.name } : {}),
-      ...(req.user?.email ? { recordedByEmail: req.user.email } : {}),
-      ...(remarks ? { remarks: String(remarks).trim() } : {}),
-      ...(transactionRef ? { transactionRef: String(transactionRef).trim() } : {}),
-    };
+    const actor = actorFrom(req);
+    const attributionFields = attributionFrom(req, { remarks, transactionRef });
 
     const [monthPayments, memberVisitors] = await Promise.all([
       Payment.find({ memberId, month }).lean(),
@@ -88,6 +138,7 @@ async function recordPayment(req, res, next) {
         ...cardFields,
         ...attributionFields,
       });
+      await logPaymentCreated(payment, actor);
       return res.status(201).json({ payment });
     }
 
@@ -112,14 +163,22 @@ async function recordPayment(req, res, next) {
       if (toAllocate <= 0) break;
       const portion = Math.min(toAllocate, charge.remaining);
       if (portion <= 0) continue;
-      await Visitor.findOneAndUpdate(
+      const updatedVisitor = await Visitor.findOneAndUpdate(
         { _id: charge.visitorId, 'charges._id': charge.chargeId },
         {
           $push: {
             'charges.$.payments': { method, amount: portion, paidAt: new Date(), ...cardFields, ...attributionFields },
           },
-        }
+        },
+        { new: true }
       );
+      if (updatedVisitor) {
+        const updatedCharge = updatedVisitor.charges.id(charge.chargeId);
+        const added = updatedCharge.payments[updatedCharge.payments.length - 1];
+        await logVisitorPayment('visitor_payment.create', updatedVisitor, added, actor, {
+          note: `Part of the ${month} membership payment`,
+        });
+      }
       toAllocate -= portion;
     }
 
@@ -143,6 +202,7 @@ async function recordPayment(req, res, next) {
       }
     }
 
+    if (payment) await logPaymentCreated(payment, actor);
     res.status(201).json({ payment });
   } catch (err) {
     next(err);
@@ -171,11 +231,27 @@ async function editPayment(req, res, next) {
       return res.status(400).json({ message: 'A reason is required to edit a payment' });
     }
 
+    const before = payment.toObject();
+    const actor = actorFrom(req);
     payment.method = method;
     payment.amount = amount;
     payment.cardLastFour = method === 'card' ? cardLastFour : undefined;
     payment.editReason = String(reason).trim();
+    payment.lastEditedAt = new Date();
+    payment.lastEditedByName = actor?.name;
     await payment.save();
+
+    // Every edit keeps its old -> new values in the history, so nothing about
+    // the original payment is lost even though the record itself is updated.
+    await logAudit({
+      action: 'payment.update',
+      entityType: 'payment',
+      entityId: payment._id,
+      memberId: payment.memberId,
+      details: { month: payment.month, amount: payment.amount, method: payment.method, reason: payment.editReason },
+      changes: diff(before, payment.toObject(), ['amount', 'method', 'cardLastFour']),
+      actor,
+    });
 
     res.json({ payment });
   } catch (err) {
@@ -183,4 +259,4 @@ async function editPayment(req, res, next) {
   }
 }
 
-module.exports = { recordPayment, editPayment, validateMethodFields };
+module.exports = { recordPayment, editPayment, validateMethodFields, attributionFrom, logVisitorPayment };

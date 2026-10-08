@@ -1,9 +1,17 @@
-const Payment = require('../models/Payment');
-const Visitor = require('../models/Visitor');
 const { getOrCreateSettings } = require('../utils/getSettings');
 const { buildMemberList, buildMemberPendingMonths } = require('../utils/paymentCalculator');
-const { findMemberById, removeMemberById, addMember, updateMemberById } = require('../utils/membersData');
+const {
+  findMemberById,
+  findMemberByPhone,
+  softDeleteMember,
+  addMember,
+  updateMemberById,
+} = require('../utils/membersData');
+const { updateAllowedUserPhone } = require('../utils/allowedUsersData');
+const User = require('../models/User');
 const { normalizePhone } = require('../utils/phone');
+const { actorFrom, diff, logAudit } = require('../utils/audit');
+const { buildMemberTimeline } = require('../utils/memberHistory');
 
 const DEFAULT_PAGE_SIZE = 15;
 
@@ -101,7 +109,7 @@ async function listMembers(req, res, next) {
 async function getPendingMonths(req, res, next) {
   try {
     const { memberId } = req.params;
-    if (!findMemberById(memberId)) {
+    if (!(await findMemberById(memberId))) {
       return res.status(404).json({ message: 'Member not found' });
     }
 
@@ -114,21 +122,27 @@ async function getPendingMonths(req, res, next) {
   }
 }
 
-// Permanently removes a member from the roster along with every payment and
-// visitor (and their payment history) recorded against them - members.json
-// has no foreign-key enforcement, so those Payment/Visitor documents would
-// otherwise be left dangling, still referencing a memberId that no longer
-// resolves to anyone.
+// Soft-deletes a member: they disappear from every list in the app, but the
+// member record and every payment and visitor recorded against them stay in
+// the database untouched, and the deletion (who, when) goes into their
+// history.
 async function deleteMember(req, res, next) {
   try {
     const { memberId } = req.params;
-    if (!findMemberById(memberId)) {
+    const actor = actorFrom(req);
+    const member = await softDeleteMember(memberId, actor);
+    if (!member) {
       return res.status(404).json({ message: 'Member not found' });
     }
 
-    await Payment.deleteMany({ memberId });
-    await Visitor.deleteMany({ memberId });
-    removeMemberById(memberId);
+    await logAudit({
+      action: 'member.delete',
+      entityType: 'member',
+      entityId: memberId,
+      memberId,
+      details: { name: member.name },
+      actor,
+    });
 
     res.json({ success: true });
   } catch (err) {
@@ -152,8 +166,21 @@ async function createMember(req, res, next) {
     if (!phone) {
       return res.status(400).json({ message: 'A valid 10-digit mobile number is required' });
     }
+    const other = await findMemberByPhone(phone);
+    if (other) {
+      return res.status(409).json({ message: `This mobile number already belongs to ${other.name}` });
+    }
 
-    const member = addMember({ name, phone });
+    const actor = actorFrom(req);
+    const member = await addMember({ name, phone }, actor);
+    await logAudit({
+      action: 'member.create',
+      entityType: 'member',
+      entityId: member.id,
+      memberId: member.id,
+      details: { name: member.name, phone: member.phone },
+      actor,
+    });
     res.status(201).json({ member });
   } catch (err) {
     next(err);
@@ -167,20 +194,71 @@ async function createMember(req, res, next) {
 async function updateMember(req, res, next) {
   try {
     const { memberId } = req.params;
-    if (!findMemberById(memberId)) {
-      return res.status(404).json({ message: 'Member not found' });
-    }
-
     const name = String(req.body.name || '').trim();
     if (!name) {
       return res.status(400).json({ message: 'Name is required' });
     }
 
-    const member = updateMemberById(memberId, { name });
-    res.json({ member });
+    // Phone is optional in the request (older app versions send name only),
+    // but when sent it must be a valid 10-digit mobile number.
+    let phone;
+    if (req.body.phone !== undefined) {
+      phone = normalizePhone(req.body.phone);
+      if (!phone) {
+        return res.status(400).json({ message: 'A valid 10-digit mobile number is required' });
+      }
+      const other = await findMemberByPhone(phone, { excludeId: memberId });
+      if (other) {
+        return res.status(409).json({ message: `This mobile number already belongs to ${other.name}` });
+      }
+    }
+
+    const result = await updateMemberById(memberId, { name, phone });
+    if (!result) {
+      return res.status(404).json({ message: 'Member not found' });
+    }
+
+    // A member who is an Admin logs in with their phone - move their login to
+    // the new number so changing it here doesn't lock them out.
+    const oldPhone = normalizePhone(result.before.phone);
+    if (phone && oldPhone && oldPhone !== phone && updateAllowedUserPhone(oldPhone, phone)) {
+      await User.updateOne({ phone: oldPhone }, { $set: { phone } });
+    }
+
+    const changes = diff(result.before, result.after, ['name', 'phone']);
+    if (changes.length) {
+      await logAudit({
+        action: 'member.update',
+        entityType: 'member',
+        entityId: memberId,
+        memberId,
+        details: { name: result.after.name },
+        changes,
+        actor: actorFrom(req),
+      });
+    }
+    res.json({ member: result.after });
   } catch (err) {
     next(err);
   }
 }
 
-module.exports = { listMembers, getPendingMonths, deleteMember, createMember, updateMember };
+// The member's complete history in one response: their details (who created
+// them and when), every payment (month, amount, method, who recorded it),
+// every still-pending month, and a newest-first timeline of everything that
+// ever happened to them (see utils/memberHistory.js).
+async function getMemberHistory(req, res, next) {
+  try {
+    const { memberId } = req.params;
+    const settings = await getOrCreateSettings();
+    const history = await buildMemberTimeline(memberId, settings);
+    if (!history) {
+      return res.status(404).json({ message: 'Member not found' });
+    }
+    res.json(history);
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = { listMembers, getPendingMonths, deleteMember, createMember, updateMember, getMemberHistory };

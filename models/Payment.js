@@ -23,6 +23,11 @@ const paymentSchema = new mongoose.Schema(
     // existed simply have neither set.
     recordedByName: { type: String, trim: true },
     recordedByEmail: { type: String, trim: true },
+    recordedById: { type: String, trim: true },
+    recordedByPhone: { type: String, trim: true },
+    // Latest edit (the full old -> new trail of every edit is in AuditLog).
+    lastEditedAt: { type: Date },
+    lastEditedByName: { type: String, trim: true },
   },
   { timestamps: true }
 );

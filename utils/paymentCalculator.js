@@ -1,10 +1,10 @@
 const Payment = require('../models/Payment');
 const Visitor = require('../models/Visitor');
-const { readMembers } = require('./membersData');
+const { readMembers, findMemberById } = require('./membersData');
 const { buildMonthRange, buildCurrentMonthAndHistory, monthKeyOf, parseMonthKey } = require('./monthRange');
 
 async function loadMemberData(monthKeys) {
-  const members = readMembers();
+  const members = await readMembers();
   const [payments, visitors] = await Promise.all([
     Payment.find({ month: { $in: monthKeys } }).sort({ paidAt: 1 }).lean(),
     Visitor.find({}).lean(),
@@ -30,6 +30,15 @@ async function loadMemberData(monthKeys) {
   return { members, paymentsByMember, visitorsByMember };
 }
 
+// The month a member was added in the app ("YYYY-MM"), or null for members
+// imported from the original roster (their join date was never recorded, so
+// every tracked month applies to them as before).
+function memberJoinMonthKey(member) {
+  if (!member || member.importedFromFile || !member.createdAt) return null;
+  const created = new Date(member.createdAt);
+  return monthKeyOf(created.getFullYear(), created.getMonth() + 1);
+}
+
 function mapPaymentEntry(payment) {
   return {
     id: payment._id,
@@ -49,12 +58,28 @@ function mapPaymentEntry(payment) {
 // 3,000 UPI) stays 'pending' until the total reaches totalDue, but the full
 // per-transaction breakdown is always included so the UI can show exactly
 // what's been paid and via which method(s).
-function buildMonthsResult(monthList, memberPaymentsByMonth, totalDue) {
+//
+// [joinKey] ("YYYY-MM", optional) is the month the member was added: a month
+// before it, with nothing paid, is 'not_applicable' - nothing was owed yet,
+// so it's neither shown as Due nor counted in any pending total.
+function buildMonthsResult(monthList, memberPaymentsByMonth, totalDue, joinKey = null) {
   const monthsResult = {};
   let pendingAmount = 0;
 
   for (const { key, label } of monthList) {
     const transactions = memberPaymentsByMonth.get(key) || [];
+    if (joinKey && key < joinKey && transactions.length === 0) {
+      monthsResult[key] = {
+        label,
+        status: 'not_applicable',
+        totalDue: 0,
+        amount: 0,
+        remaining: 0,
+        paidAt: null,
+        payments: [],
+      };
+      continue;
+    }
     const amountPaid = transactions.reduce((sum, t) => sum + t.amount, 0);
     const remaining = Math.max(totalDue - amountPaid, 0);
     const isPaid = remaining <= 0;
@@ -194,6 +219,14 @@ function getPendingChargesForMonth(memberVisitors, monthKey, visitorFee, visitor
   return pendingCharges;
 }
 
+// The months the app tracks: the current month first ("This Month"), then
+// every earlier month back to Settings.columnDisplayStartMonth.
+function trackedMonths(settings, now = new Date()) {
+  const { year: startYear, month: startMonth } = parseMonthKey(settings.columnDisplayStartMonth);
+  const monthsSinceStart = Math.max(0, (now.getFullYear() * 12 + now.getMonth() + 1) - (startYear * 12 + startMonth));
+  return buildCurrentMonthAndHistory(now, monthsSinceStart);
+}
+
 // Builds the Home-screen member list. Two independent month windows are in
 // play here, deliberately kept separate:
 //   - displayMonths: the visible table columns, spanning every month from
@@ -201,24 +234,23 @@ function getPendingChargesForMonth(memberVisitors, monthKey, visitorFee, visitor
 //     (current month first, labelled "This Month", then each prior month in
 //     reverse-chronological order) - grows by one column every 1st with no
 //     manual upkeep, purely as historical context.
-//   - currentMonthOnly: what Total Pending is computed from - always just
-//     the live current month, never accumulating past months, so the
-//     headline "Pending" figure only ever reflects what's due right now.
-// Both are re-derived from the system clock on every request.
+//   Total Pending is the sum of EVERY unpaid month in that same window (not
+//   just the current month) plus unpaid visitor/guest fees - so the Home
+//   screen's Pending column matches the member's history screen exactly.
+// Re-derived from the system clock on every request.
 async function buildMemberList(settings) {
-  const now = new Date();
-  const currentMonthOnly = buildCurrentMonthAndHistory(now, 0);
-  const { year: startYear, month: startMonth } = parseMonthKey(settings.columnDisplayStartMonth);
-  const monthsSinceStart = Math.max(0, (now.getFullYear() * 12 + now.getMonth() + 1) - (startYear * 12 + startMonth));
-  const displayMonths = buildCurrentMonthAndHistory(now, monthsSinceStart);
-  const allKeys = Array.from(new Set([...currentMonthOnly, ...displayMonths].map((m) => m.key)));
-
-  const { members, paymentsByMember, visitorsByMember } = await loadMemberData(allKeys);
+  const displayMonths = trackedMonths(settings);
+  const { members, paymentsByMember, visitorsByMember } = await loadMemberData(displayMonths.map((m) => m.key));
 
   return members.map((member) => {
     const memberPayments = paymentsByMember.get(member.id) || new Map();
-    const { pendingAmount } = buildMonthsResult(currentMonthOnly, memberPayments, settings.monthlyFee);
-    const { monthsResult } = buildMonthsResult(displayMonths, memberPayments, settings.monthlyFee);
+    const joinKey = memberJoinMonthKey(member);
+    const { monthsResult, pendingAmount } = buildMonthsResult(
+      displayMonths,
+      memberPayments,
+      settings.monthlyFee,
+      joinKey
+    );
 
     const memberVisitors = visitorsByMember.get(member.id) || [];
     const visitorStatuses = mapVisitors(memberVisitors, settings.visitorFee, settings.visitorPaymentStartDate);
@@ -228,6 +260,7 @@ async function buildMemberList(settings) {
     return {
       id: member.id,
       name: member.name,
+      phone: member.phone || '',
       totalPending,
       months: monthsResult,
       visitors: visitorStatuses,
@@ -246,7 +279,12 @@ async function buildMemberHistory(settings) {
 
   return members.map((member) => {
     const memberPayments = paymentsByMember.get(member.id) || new Map();
-    const { monthsResult, pendingAmount } = buildMonthsResult(historicalMonths, memberPayments, settings.monthlyFee);
+    const { monthsResult, pendingAmount } = buildMonthsResult(
+      historicalMonths,
+      memberPayments,
+      settings.monthlyFee,
+      memberJoinMonthKey(member)
+    );
 
     const memberVisitors = visitorsByMember.get(member.id) || [];
     const visitorStatuses = mapVisitors(memberVisitors, settings.visitorFee, settings.visitorPaymentStartDate);
@@ -265,27 +303,29 @@ async function buildMemberHistory(settings) {
 
 // Builds the pending-months list for a single member - powers both the
 // "Current Month" payment sheet and the Pending Breakdown sheet (opened by
-// tapping the Home screen's Pending amount). Deliberately scoped to just the
-// live current month, matching Total Pending above: older months (even if
-// still unpaid) are not surfaced here, so this list and the headline Pending
-// figure a member sees always agree with each other. The current month is
+// tapping the Home screen's Pending amount). Covers every tracked month
+// (same window as Total Pending above), oldest first, so this list always
+// adds up to the Pending figure shown for the member. The current month is
 // always included even when it's already fully paid, so tapping an
 // already-paid current month still opens somewhere to view (and edit) its
 // payment details instead of finding "no pending months".
 async function buildMemberPendingMonths(memberId, settings) {
   const now = new Date();
-  const currentMonthOnly = buildCurrentMonthAndHistory(now, 0);
-  const monthKeys = currentMonthOnly.map((m) => m.key);
+  const months = trackedMonths(settings, now).slice().reverse(); // oldest first
+  const monthKeys = months.map((m) => m.key);
   const currentKey = monthKeyOf(now.getFullYear(), now.getMonth() + 1);
 
-  const payments = await Payment.find({ memberId, month: { $in: monthKeys } }).sort({ paidAt: 1 }).lean();
+  const [payments, member] = await Promise.all([
+    Payment.find({ memberId, month: { $in: monthKeys } }).sort({ paidAt: 1 }).lean(),
+    findMemberById(memberId),
+  ]);
   const memberPayments = new Map();
   for (const payment of payments) {
     if (!memberPayments.has(payment.month)) memberPayments.set(payment.month, []);
     memberPayments.get(payment.month).push(payment);
   }
 
-  const { monthsResult } = buildMonthsResult(currentMonthOnly, memberPayments, settings.monthlyFee);
+  const { monthsResult } = buildMonthsResult(months, memberPayments, settings.monthlyFee, memberJoinMonthKey(member));
 
   return Object.entries(monthsResult)
     .filter(([key, month]) => month.status === 'pending' || key === currentKey)
@@ -298,6 +338,7 @@ module.exports = {
   buildMemberPendingMonths,
   buildVisitorStatus,
   getPendingChargesForMonth,
+  memberJoinMonthKey,
   visitorMonthKey,
   isVisitorInScope,
 };

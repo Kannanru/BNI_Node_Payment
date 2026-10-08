@@ -23,6 +23,7 @@ const ExcelJS = require('exceljs');
 const User = require('../models/User');
 const Payment = require('../models/Payment');
 const Visitor = require('../models/Visitor');
+const SeedState = require('../models/SeedState');
 const { readAllowedUsers } = require('../utils/allowedUsersData');
 const { readMembers } = require('../utils/membersData');
 const { normalizePhone } = require('../utils/phone');
@@ -117,7 +118,7 @@ async function ensureUsers() {
 // deletes anything - only returns docs to insert for whatever isn't already
 // in the database (see ensurePaymentData below for the actual comparison).
 async function parseJulySheet() {
-  const members = readMembers();
+  const members = await readMembers({ includeDeleted: true });
   const nameToId = new Map(members.map((m) => [norm(m.name), m.id]));
   const viswanathanId = nameToId.get(norm('VISWANATHAN S'));
   if (!viswanathanId) throw new Error('VISWANATHAN S not found in members.json - needed as the visitor placeholder host');
@@ -251,7 +252,29 @@ async function ensureVisitorData(visitorDocs) {
   return { inserted: toInsert.length, skipped: visitorDocs.length - toInsert.length };
 }
 
+// One-time import of the July 2026 sheet. It used to re-check on every start
+// and re-insert any July record it couldn't find - which would bring back a
+// payment or visitor an admin had since edited or deleted. Now it runs at
+// most once per database, recorded in SeedState.
+const JULY_IMPORT_KEY = 'july-2026-excel-import';
+
 async function ensureJulyPaymentData() {
+  if (await SeedState.exists({ key: JULY_IMPORT_KEY })) {
+    console.log('[seed] July import: already done on this database - skipped.');
+    return;
+  }
+
+  // Databases that already received this import before the marker existed:
+  // just record it as done, insert nothing.
+  const alreadyImported =
+    (await Payment.exists({ month: MONTH_KEY })) ||
+    (await Visitor.exists({ name: new RegExp(` - ${MONTH_KEY}$`) }).setOptions({ withDeleted: true }));
+  if (alreadyImported) {
+    await SeedState.create({ key: JULY_IMPORT_KEY, note: 'Existing July data found - marked done without importing.' });
+    console.log('[seed] July import: existing July data found - marked as done, nothing re-inserted.');
+    return;
+  }
+
   if (!fs.existsSync(EXCEL_PATH)) {
     console.warn(`[seed] Excel source not found at ${EXCEL_PATH} - skipping July payment/visitor seeding.`);
     return;
@@ -267,6 +290,7 @@ async function ensureJulyPaymentData() {
   console.log(
     `[seed] Visitor placeholders: ${visitorResult.inserted} inserted, ${visitorResult.skipped || 0} already present.`
   );
+  await SeedState.create({ key: JULY_IMPORT_KEY, note: 'Imported from the Excel sheet.' });
 }
 
 // Backfill for a visitor with no charges at all yet - shouldn't happen via
