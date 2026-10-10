@@ -1,5 +1,5 @@
 const { getOrCreateSettings } = require('../utils/getSettings');
-const { buildMemberList, buildMemberPendingMonths } = require('../utils/paymentCalculator');
+const { buildMemberList, buildMemberPendingMonths, buildMemberUpcomingMonth } = require('../utils/paymentCalculator');
 const {
   findMemberById,
   findMemberByPhone,
@@ -118,6 +118,27 @@ async function getPendingMonths(req, res, next) {
     const pendingMonths = await buildMemberPendingMonths(memberId, settings);
 
     res.json({ pendingMonths, monthlyFee: currentFees(await loadFeeResolver(settings)).member });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// Powers the Pending Breakdown's "+" button: one upcoming month for this
+// member, only once that month's fee has been saved in Fee Settings
+// (409 FEE_NOT_CONFIGURED otherwise, so nothing is added).
+async function getUpcomingMonth(req, res, next) {
+  try {
+    const { memberId, monthKey } = req.params;
+    if (!(await findMemberById(memberId))) {
+      return res.status(404).json({ message: 'Member not found' });
+    }
+
+    const settings = await getOrCreateSettings();
+    const { month, error, code } = await buildMemberUpcomingMonth(memberId, monthKey, settings);
+    if (error) {
+      return res.status(code === 'FEE_NOT_CONFIGURED' ? 409 : 400).json({ message: error, code });
+    }
+    res.json({ month });
   } catch (err) {
     next(err);
   }
@@ -262,4 +283,4 @@ async function getMemberHistory(req, res, next) {
   }
 }
 
-module.exports = { listMembers, getPendingMonths, deleteMember, createMember, updateMember, getMemberHistory };
+module.exports = { listMembers, getPendingMonths, getUpcomingMonth, deleteMember, createMember, updateMember, getMemberHistory };

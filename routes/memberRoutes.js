@@ -2,6 +2,7 @@ const express = require('express');
 const {
   listMembers,
   getPendingMonths,
+  getUpcomingMonth,
   deleteMember,
   createMember,
   updateMember,
@@ -12,6 +13,7 @@ const router = express.Router();
 
 router.get('/', listMembers);
 router.get('/:memberId/pending-months', getPendingMonths);
+router.get('/:memberId/upcoming-months/:monthKey', getUpcomingMonth);
 router.get('/:memberId/history', getMemberHistory);
 router.post('/', createMember);
 router.patch('/:memberId', updateMember);

@@ -1,8 +1,15 @@
 const Payment = require('../models/Payment');
 const Visitor = require('../models/Visitor');
 const { readMembers, findMemberById } = require('./membersData');
-const { loadFeeResolver } = require('./feeSchedule');
-const { buildMonthRange, buildCurrentMonthAndHistory, monthKeyOf, parseMonthKey } = require('./monthRange');
+const { loadFeeResolver, loadFeeSchedule, makeFeeResolver } = require('./feeSchedule');
+const {
+  buildMonthRange,
+  buildMonthRangeBetween,
+  buildCurrentMonthAndHistory,
+  monthKeyOf,
+  parseMonthKey,
+  shortMonthYearLabel,
+} = require('./monthRange');
 
 async function loadMemberData(monthKeys) {
   const members = await readMembers();
@@ -82,11 +89,17 @@ function mapPaymentEntry(payment) {
 // [feeForMonth] is either a number (same fee every month) or a function
 // (monthKey) => fee, so each month is measured against the fee that applied
 // to THAT month (see utils/feeSchedule.js) rather than today's fee.
-function buildMonthsResult(monthList, memberPaymentsByMonth, feeForMonth, joinKey = null) {
+//
+// [currentKey] ("YYYY-MM", optional) marks the live month: each month gets
+// isCurrent / isUpcoming flags, and a month after it isn't owed yet - unless
+// already covered it's 'upcoming' and left out of the pending total.
+function buildMonthsResult(monthList, memberPaymentsByMonth, feeForMonth, joinKey = null, currentKey = null) {
   const monthsResult = {};
   let pendingAmount = 0;
 
   for (const { key, label } of monthList) {
+    const isUpcoming = Boolean(currentKey && key > currentKey);
+    const flags = currentKey ? { isCurrent: key === currentKey, isUpcoming } : {};
     const totalDue = typeof feeForMonth === 'function' ? feeForMonth(key) : feeForMonth;
     const transactions = memberPaymentsByMonth.get(key) || [];
     if (joinKey && key < joinKey && transactions.length === 0) {
@@ -98,6 +111,7 @@ function buildMonthsResult(monthList, memberPaymentsByMonth, feeForMonth, joinKe
         remaining: 0,
         paidAt: null,
         payments: [],
+        ...flags,
       };
       continue;
     }
@@ -106,12 +120,16 @@ function buildMonthsResult(monthList, memberPaymentsByMonth, feeForMonth, joinKe
     const latestPaidAt = transactions.length
       ? transactions.reduce((latest, t) => (t.paidAt > latest ? t.paidAt : latest), transactions[0].paidAt)
       : null;
-    const status = monthStatus(totalDue, amountPaid);
+    let status = monthStatus(totalDue, amountPaid);
+    if (status === 'partial') status = 'pending';
+    // A future month with a fee that isn't fully paid yet isn't due yet.
+    if (isUpcoming && status === 'pending') status = 'upcoming';
 
     monthsResult[key] = {
       label,
       // 'paid' | 'overpaid' | 'pending' (nothing or part paid) | 'no_fee'
-      status: status === 'partial' ? 'pending' : status,
+      // | 'upcoming' (a future month, not owed yet)
+      status,
       totalDue,
       amount: amountPaid,
       remaining,
@@ -119,9 +137,10 @@ function buildMonthsResult(monthList, memberPaymentsByMonth, feeForMonth, joinKe
       excess: Math.max(amountPaid - totalDue, 0),
       paidAt: latestPaidAt,
       payments: transactions.map(mapPaymentEntry),
+      ...flags,
     };
 
-    pendingAmount += remaining;
+    if (!isUpcoming) pendingAmount += remaining;
   }
 
   return { monthsResult, pendingAmount };
@@ -251,29 +270,68 @@ function trackedMonths(settings, now = new Date()) {
   return buildCurrentMonthAndHistory(now, monthsSinceStart);
 }
 
-// Builds the Home-screen member list. Two independent month windows are in
-// play here, deliberately kept separate:
-//   - displayMonths: the visible table columns, spanning every month from
-//     Settings.columnDisplayStartMonth through the live current month
-//     (current month first, labelled "This Month", then each prior month in
-//     reverse-chronological order) - grows by one column every 1st with no
-//     manual upkeep, purely as historical context.
-//   Total Pending is the sum of EVERY unpaid month in that same window (not
-//   just the current month) plus unpaid visitor/guest fees - so the Home
-//   screen's Pending column matches the member's history screen exactly.
-// Re-derived from the system clock on every request.
+// The latest month with a membership fee saved (> 0) in Fee Settings, or null.
+function latestConfiguredMemberMonth(schedule) {
+  let latest = null;
+  for (const fee of schedule.monthly.values()) {
+    if (fee.role === 'member' && fee.amount > 0 && (!latest || fee.month > latest)) latest = fee.month;
+  }
+  return latest;
+}
+
+function addMonthsToKey(monthKey, count) {
+  const { year, month } = parseMonthKey(monthKey);
+  const index = year * 12 + (month - 1) + count;
+  return monthKeyOf(Math.floor(index / 12), (index % 12) + 1);
+}
+
+// The Home screen's month columns, oldest first: every month from
+// Settings.columnDisplayStartMonth through the current month ("This Month"),
+// extended forward to the latest month whose fee has been saved in Fee
+// Settings (at most MAX_UPCOMING_MONTHS ahead) - so saving a future month's
+// fee adds its column automatically. Any month in between with no fee saved
+// still gets its column (shown as "No fee"), keeping the order unbroken.
+function homeColumnMonths(settings, schedule, now = new Date()) {
+  const currentKey = monthKeyOf(now.getFullYear(), now.getMonth() + 1);
+  const startKey = settings.columnDisplayStartMonth || currentKey;
+  let endKey = currentKey;
+  const latest = latestConfiguredMemberMonth(schedule);
+  if (latest && latest > endKey) {
+    const cap = addMonthsToKey(currentKey, MAX_UPCOMING_MONTHS);
+    endKey = latest > cap ? cap : latest;
+  }
+  return buildMonthRangeBetween(startKey < endKey ? startKey : endKey, endKey).map(({ key }) => {
+    const { year, month } = parseMonthKey(key);
+    return { key, label: key === currentKey ? 'This Month' : shortMonthYearLabel(month, year) };
+  });
+}
+
+// Builds the Home-screen member list. Its month columns (see
+// homeColumnMonths) run oldest to newest, through any future month whose fee
+// is saved. Total Pending is the sum of every unpaid month up to and
+// including the current month (future months aren't owed yet) plus unpaid
+// visitor/guest fees - so the Home screen's Pending column matches the
+// member's history screen exactly. Re-derived from the system clock on every
+// request.
 async function buildMemberList(settings) {
-  const displayMonths = trackedMonths(settings);
-  const [{ members, paymentsByMember, visitorsByMember }, resolveFee] = await Promise.all([
-    loadMemberData(displayMonths.map((m) => m.key)),
-    loadFeeResolver(settings),
-  ]);
+  const now = new Date();
+  const currentKey = monthKeyOf(now.getFullYear(), now.getMonth() + 1);
+  const schedule = await loadFeeSchedule();
+  const displayMonths = homeColumnMonths(settings, schedule, now);
+  const resolveFee = makeFeeResolver(schedule, settings);
+  const { members, paymentsByMember, visitorsByMember } = await loadMemberData(displayMonths.map((m) => m.key));
   const memberFee = (monthKey) => resolveFee('member', monthKey);
 
   return members.map((member) => {
     const memberPayments = paymentsByMember.get(member.id) || new Map();
     const joinKey = memberJoinMonthKey(member);
-    const { monthsResult, pendingAmount } = buildMonthsResult(displayMonths, memberPayments, memberFee, joinKey);
+    const { monthsResult, pendingAmount } = buildMonthsResult(
+      displayMonths,
+      memberPayments,
+      memberFee,
+      joinKey,
+      currentKey
+    );
 
     const memberVisitors = visitorsByMember.get(member.id) || [];
     const visitorStatuses = mapVisitors(memberVisitors, settings.visitorFee, settings.visitorPaymentStartDate);
@@ -363,10 +421,55 @@ async function buildMemberPendingMonths(memberId, settings) {
     .map(([monthKey, month]) => ({ monthKey, ...month }));
 }
 
+// How far ahead the Pending Breakdown's "+" can add a month for payment -
+// same limit as advance payments (see paymentController.js).
+const MAX_UPCOMING_MONTHS = 12;
+
+// One upcoming month for the Pending Breakdown's "+" button, in the same
+// shape as a buildMemberPendingMonths entry. A month can only be added once
+// its membership fee has been saved in Fee Settings: returns
+// { error, code } instead when the month is invalid or has no fee yet.
+async function buildMemberUpcomingMonth(memberId, monthKey, settings, now = new Date()) {
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(monthKey || '')) {
+    return { error: 'month must be in YYYY-MM format', code: 'INVALID_MONTH' };
+  }
+  const currentKey = monthKeyOf(now.getFullYear(), now.getMonth() + 1);
+  const { year, month } = parseMonthKey(monthKey);
+  const monthsAhead = year * 12 + month - (now.getFullYear() * 12 + now.getMonth() + 1);
+  if (monthKey <= currentKey) {
+    return { error: 'Only an upcoming month can be added.', code: 'INVALID_MONTH' };
+  }
+  if (monthsAhead > MAX_UPCOMING_MONTHS) {
+    return { error: `Payments can be added up to ${MAX_UPCOMING_MONTHS} months ahead.`, code: 'TOO_FAR_AHEAD' };
+  }
+
+  const label = shortMonthYearLabel(month, year);
+  const [payments, resolveFee] = await Promise.all([
+    Payment.find({ memberId, month: monthKey }).sort({ paidAt: 1 }).lean(),
+    loadFeeResolver(settings),
+  ]);
+  const fee = resolveFee('member', monthKey);
+  if (fee <= 0) {
+    return {
+      error: `The fee for ${label} is not set yet. Configure and save it in Settings → Change Fee first.`,
+      code: 'FEE_NOT_CONFIGURED',
+    };
+  }
+
+  const { monthsResult } = buildMonthsResult(
+    [{ key: monthKey, label }],
+    new Map([[monthKey, payments]]),
+    () => fee
+  );
+  return { month: { monthKey, ...monthsResult[monthKey] } };
+}
+
 module.exports = {
   buildMemberList,
   buildMemberHistory,
   buildMemberPendingMonths,
+  buildMemberUpcomingMonth,
+  MAX_UPCOMING_MONTHS,
   buildVisitorStatus,
   getPendingChargesForMonth,
   memberJoinMonthKey,
